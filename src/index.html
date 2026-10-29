@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-accent="blue">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Markdown</title>
+  <link rel="stylesheet" href="styles.css" />
+  <script src="theme.js"></script>
+  <script src="main.js" defer></script>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <symbol id="i-sidebar" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9 4v16"/></symbol>
+      <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></symbol>
+      <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2.2h7.4A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/></symbol>
+      <symbol id="i-folder-plus" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6l2 2.2h7.4A2.5 2.5 0 0 1 21 9.7v7.8a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 17.5z"/><path d="M12 10.5v6M9 13.5h6"/></symbol>
+      <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></symbol>
+      <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+      <symbol id="i-up" viewBox="0 0 24 24"><path d="m6 15 6-6 6 6"/></symbol>
+      <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+      <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></symbol>
+      <symbol id="i-min" viewBox="0 0 24 24"><path d="M6 12h12"/></symbol>
+      <symbol id="i-max" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2.5"/></symbol>
+      <symbol id="i-restore" viewBox="0 0 24 24"><rect x="5" y="9" width="10" height="10" rx="2.5"/><path d="M9 6.5A1.5 1.5 0 0 1 10.5 5h7A1.5 1.5 0 0 1 19 6.5v7a1.5 1.5 0 0 1-1.5 1.5"/></symbol>
+      <symbol id="i-read" viewBox="0 0 24 24"><path d="M12 7c-1.8-1.4-4.4-2-8-2v13c3.6 0 6.2.6 8 2 1.8-1.4 4.4-2 8-2V5c-3.6 0-6.2.6-8 2z"/><path d="M12 7v13"/></symbol>
+      <symbol id="i-split" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M12 4v16"/></symbol>
+      <symbol id="i-edit" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
+      <symbol id="i-pdf" viewBox="0 0 24 24"><path d="M7 9V4h10v5"/><rect x="3" y="9" width="18" height="8" rx="2.5"/><path d="M7 14h10v6H7z"/></symbol>
+      <symbol id="i-settings" viewBox="0 0 24 24"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><rect x="13" y="4.5" width="4" height="5" rx="1.2"/><rect x="7" y="14.5" width="4" height="5" rx="1.2"/></symbol>
+      <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 0 0-14.6-4.5M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.6 4.5M20 20v-4h-4"/></symbol>
+      <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6.5A2.5 2.5 0 0 0 13.5 4h-7A2.5 2.5 0 0 0 4 6.5v7A2.5 2.5 0 0 0 6.5 16H8"/></symbol>
+      <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5"/></symbol>
+      <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 8v5M12 16.5v.5"/><rect x="3" y="3" width="18" height="18" rx="5"/></symbol>
+      <symbol id="i-drop" viewBox="0 0 24 24"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5"/><path d="M4 15v2.5A2.5 2.5 0 0 0 6.5 20h11a2.5 2.5 0 0 0 2.5-2.5V15"/></symbol>
+      <symbol id="i-replace" viewBox="0 0 24 24"><path d="M4 8h12.5M13 4.5 16.5 8 13 11.5"/><path d="M20 16H7.5M11 12.5 7.5 16 11 19.5"/></symbol>
+      <symbol id="i-replace-all" viewBox="0 0 24 24"><path d="M4 6h9M4 12h6M4 18h9"/><path d="M15 9h5l-2.5-3M20 9l-2.5 3"/><path d="M20 15h-5l2.5-3M15 15l2.5 3"/></symbol>
+      <symbol id="i-clock" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="5"/><path d="M12 8v4l2.5 2"/></symbol>
+    </defs>
+  </svg>
+
+  <div class="window" data-sidebar="">
+    <header class="titlebar" data-tauri-drag-region>
+      <div class="tb-group">
+        <button class="icon-btn" data-action="toggle-sidebar" data-tip="Toggle sidebar" data-key="Ctrl B" aria-label="Toggle sidebar"><svg><use href="#i-sidebar"/></svg></button>
+      </div>
+      <div class="doc-title" data-tauri-drag-region>
+        <span class="doc-name" data-tauri-drag-region>Markdown</span>
+        <i class="dirty-dot" hidden title="Unsaved changes"></i>
+      </div>
+      <div class="tb-group tb-doc" hidden>
+        <div class="segmented" role="radiogroup" aria-label="View mode">
+          <button role="radio" data-mode="read" data-tip="Read" data-key="Alt R"><svg><use href="#i-read"/></svg><span>Read</span></button>
+          <button role="radio" data-mode="split" data-tip="Edit with preview" data-key="Alt S"><svg><use href="#i-split"/></svg><span>Split</span></button>
+          <button role="radio" data-mode="edit" data-tip="Edit source" data-key="Alt E"><svg><use href="#i-edit"/></svg><span>Edit</span></button>
+        </div>
+        <span class="tb-sep"></span>
+        <button class="icon-btn" data-action="find" data-tip="Find in document" data-key="Ctrl F" aria-label="Find in document"><svg><use href="#i-search"/></svg></button>
+        <button class="icon-btn" data-action="pdf" data-tip="Export as PDF" data-key="Ctrl P" aria-label="Export as PDF"><svg><use href="#i-pdf"/></svg></button>
+      </div>
+      <div class="tb-group">
+        <button class="icon-btn" data-action="settings" data-tip="Settings" data-key="Ctrl ," aria-label="Settings"><svg><use href="#i-settings"/></svg></button>
+        <span class="tb-sep"></span>
+        <button class="win-btn" data-action="minimize" aria-label="Minimize"><svg><use href="#i-min"/></svg></button>
+        <button class="win-btn" data-action="maximize" aria-label="Maximize"><svg><use href="#i-max"/></svg></button>
+        <button class="win-btn win-close" data-action="close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+      </div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar" aria-label="Files">
+        <div class="sb-top">
+          <label class="search-field">
+            <svg><use href="#i-search"/></svg>
+            <input class="sb-search" type="text" placeholder="Search files and contents" spellcheck="false" aria-label="Search files and contents" />
+            <button class="field-clear" data-action="clear-search" aria-label="Clear search" hidden><svg><use href="#i-x"/></svg></button>
+          </label>
+          <div class="sb-actions">
+            <button class="btn" data-action="open-file"><svg><use href="#i-file"/></svg>Open file</button>
+            <button class="btn" data-action="open-folder"><svg><use href="#i-folder-plus"/></svg>Open folder</button>
+          </div>
+        </div>
+        <nav class="sb-list" aria-live="polite"></nav>
+      </aside>
+      <div class="splitter" role="separator" aria-orientation="vertical" aria-label="Resize sidebar"></div>
+
+      <main class="content">
+        <section class="welcome" hidden>
+          <div class="hero-tile"><svg><use href="#i-file"/></svg></div>
+          <h1 class="wordmark">Markdown</h1>
+          <p class="tagline">A calm place to read and write. Open a file, pick a folder, or drop a document anywhere in this window.</p>
+          <div class="dashed"></div>
+          <div class="suggestions"></div>
+          <div class="welcome-actions">
+            <button class="btn btn-primary" data-action="open-file">Open file <kbd>Ctrl O</kbd></button>
+            <button class="btn" data-action="open-folder">Open folder</button>
+          </div>
+        </section>
+
+        <section class="doc" data-mode="read" hidden>
+          <div class="pane editor-pane">
+            <div class="editor-hl" aria-hidden="true"></div>
+            <textarea class="editor" spellcheck="false" aria-label="Markdown source"></textarea>
+          </div>
+          <div class="pane preview-pane">
+            <article class="md"></article>
+          </div>
+        </section>
+
+        <div class="findbar popover" role="search" hidden>
+          <button class="icon-btn sm find-toggle" data-action="find-replace" aria-expanded="false" data-tip="Toggle replace" data-key="Ctrl H" aria-label="Toggle replace"><svg><use href="#i-chevron"/></svg></button>
+          <div class="find-rows">
+            <div class="find-row">
+              <label class="find-field">
+                <input class="find-input" type="text" placeholder="Find" spellcheck="false" aria-label="Find in document" />
+                <button class="find-opt" data-action="find-opt" data-opt="matchCase" aria-pressed="false" data-tip="Match case" aria-label="Match case">Aa</button>
+                <button class="find-opt" data-action="find-opt" data-opt="word" aria-pressed="false" data-tip="Match whole word" aria-label="Match whole word"><u>ab</u></button>
+                <button class="find-opt" data-action="find-opt" data-opt="regex" aria-pressed="false" data-tip="Use regular expression" aria-label="Use regular expression">.*</button>
+              </label>
+              <span class="find-count" aria-live="polite"></span>
+              <button class="icon-btn sm" data-action="find-prev" data-tip="Previous match" data-key="Shift Enter" aria-label="Previous match"><svg><use href="#i-up"/></svg></button>
+              <button class="icon-btn sm" data-action="find-next" data-tip="Next match" data-key="Enter" aria-label="Next match"><svg><use href="#i-down"/></svg></button>
+              <button class="icon-btn sm" data-action="find-close" data-tip="Close" data-key="Esc" aria-label="Close find"><svg><use href="#i-x"/></svg></button>
+            </div>
+            <div class="find-row replace-row" hidden>
+              <label class="find-field">
+                <input class="replace-input" type="text" placeholder="Replace" spellcheck="false" aria-label="Replace with" />
+              </label>
+              <button class="icon-btn sm" data-action="replace-one" data-tip="Replace" data-key="Enter" aria-label="Replace"><svg><use href="#i-replace"/></svg></button>
+              <button class="icon-btn sm" data-action="replace-all" data-tip="Replace all" data-key="Ctrl Alt Enter" aria-label="Replace all"><svg><use href="#i-replace-all"/></svg></button>
+            </div>
+          </div>
+        </div>
+
+        <footer class="statusbar" hidden>
+          <span class="st-path"></span>
+          <span class="st-spacer"></span>
+          <span class="st-pos"></span>
+          <span class="st-words"></span>
+          <span class="st-save"></span>
+        </footer>
+      </main>
+    </div>
+
+    <div class="drop-overlay" hidden>
+      <div><svg><use href="#i-drop"/></svg><p>Drop a Markdown file to open it</p></div>
+    </div>
+  </div>
+
+  <div class="toasts" role="status"></div>
+  <div class="tooltip" role="tooltip" hidden></div>
+  <div class="ctx-menu popover" role="menu" hidden></div>
+
+  <dialog class="dialog dlg-settings" aria-labelledby="settings-title">
+    <div class="dialog-head">
+      <h2 id="settings-title">Appearance</h2>
+      <button class="icon-btn" data-action="dialog-close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="card">
+      <div class="row">
+        <div><div class="row-label">Theme</div><div class="row-desc">Follow the system or pick one.</div></div>
+        <div class="segmented" data-setting="theme">
+          <button data-value="system">System</button><button data-value="light">Light</button><button data-value="dark">Dark</button><button data-value="monokai" data-tip="Monokai Pro Light">Monokai</button><button data-value="vercel" data-tip="Vercel Dark (OLED)">Vercel</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Accent color</div><div class="row-desc">Used for links, selection, and actions.</div></div>
+        <div class="swatches" role="radiogroup" aria-label="Accent color"></div>
+      </div>
+      <div class="row">
+        <div class="row-label">Font size</div>
+        <div class="segmented" data-setting="fontSize">
+          <button data-value="13">Small</button><button data-value="14">Medium</button><button data-value="16">Large</button><button data-value="18">Huge</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Reading width</div><div class="row-desc">Width of the document column.</div></div>
+        <div class="segmented" data-setting="width">
+          <button data-value="normal">Normal</button><button data-value="wide">Wide</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Interface font</div><div class="row-desc">Sidebar, toolbar, and dialogs.</div></div>
+        <label class="search-field font-field"><input class="font-input" data-font="fontUi" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Interface font" /></label>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Document font</div><div class="row-desc">Text of the rendered document.</div></div>
+        <label class="search-field font-field"><input class="font-input" data-font="fontView" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Document font" /></label>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Editor font</div><div class="row-desc">Markdown source in the editor.</div></div>
+        <label class="search-field font-field"><input class="font-input" data-font="fontEditor" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Editor font" /></label>
+      </div>
+    </div>
+    <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
+         ids (for aria) are prefixed so rendered heading ids can't collide. -->
+    <div class="font-menu popover" id="app-font-menu" role="listbox" aria-label="Fonts" hidden></div>
+  </dialog>
+
+  <dialog class="dialog dlg-confirm" aria-labelledby="confirm-title">
+    <div class="dialog-head">
+      <h2 id="confirm-title">Save changes?</h2>
+    </div>
+    <p class="dialog-text">Your changes will be lost if you don't save them.</p>
+    <div class="dialog-foot">
+      <button class="btn btn-danger" value="discard">Don't save</button>
+      <span class="st-spacer"></span>
+      <button class="btn btn-outline" value="cancel">Cancel</button>
+      <button class="btn btn-primary" value="save">Save</button>
+    </div>
+  </dialog>
+</body>
+</html>
