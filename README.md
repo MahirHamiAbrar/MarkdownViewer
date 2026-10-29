@@ -33,7 +33,7 @@ built with Tauri.
 
 ## Download & install (Linux)
 
-Every `v*` tag is built by the [CI pipeline](.github/workflows/ci.yml) and published on the
+Every `v*` tag is built by the [CI pipeline](.gitlab-ci.yml) and published on the
 [Releases page](../../releases) — download a package and install it directly, no build required:
 
 - **`Markdown_<version>_amd64.deb`** — Debian, Ubuntu, and derivatives
