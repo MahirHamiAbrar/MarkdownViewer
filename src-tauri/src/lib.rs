@@ -10,6 +10,7 @@ use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use comrak::options::Plugins;
 use comrak::{markdown_to_html_with_plugins, Options};
 use serde::Serialize;
+use tauri::Manager;
 
 /// Syntect is the slowest step of a render; the preview re-renders on every edit, so
 /// unchanged code blocks reuse their highlighted HTML.
@@ -123,8 +124,31 @@ fn initial_file() -> Option<String> {
 }
 
 #[tauri::command]
+fn app_version(app: tauri::AppHandle) -> String {
+    app.package_info().version.to_string()
+}
+
+#[tauri::command]
 fn print_page(webview: tauri::Webview) -> Result<(), String> {
     webview.print().map_err(|e| e.to_string())
+}
+
+/// Opens another blank window alongside the current one. `?fresh=1` stops the
+/// frontend from restoring the last file or the CLI-argument file in it.
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+    let windows = app.webview_windows();
+    let label = (2..).map(|n| format!("main-{n}")).find(|l| !windows.contains_key(l)).unwrap();
+    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html?fresh=1".into()))
+        .title("Markdown")
+        .inner_size(1180., 780.)
+        .min_inner_size(640., 420.)
+        .decorations(false)
+        .transparent(true)
+        .center()
+        .build()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn font_families(fc_list: &str) -> Vec<String> {
@@ -264,7 +288,9 @@ pub fn run() {
             read_file,
             write_file,
             initial_file,
+            app_version,
             print_page,
+            new_window,
             list_markdown,
             search_files,
             list_fonts

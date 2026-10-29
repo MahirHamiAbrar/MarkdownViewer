@@ -36,6 +36,10 @@
       <symbol id="i-replace" viewBox="0 0 24 24"><path d="M4 8h12.5M13 4.5 16.5 8 13 11.5"/><path d="M20 16H7.5M11 12.5 7.5 16 11 19.5"/></symbol>
       <symbol id="i-replace-all" viewBox="0 0 24 24"><path d="M4 6h9M4 12h6M4 18h9"/><path d="M15 9h5l-2.5-3M20 9l-2.5 3"/><path d="M20 15h-5l2.5-3M15 15l2.5 3"/></symbol>
       <symbol id="i-clock" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="17" height="17" rx="5"/><path d="M12 8v4l2.5 2"/></symbol>
+      <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+      <symbol id="i-window" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 9h17"/><path d="M12 12v4M10 14h4"/></symbol>
+      <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h8L20 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-10A2.5 2.5 0 0 1 5 17.5z"/><path d="M8.5 4v4.5h7"/><rect x="8.5" y="13" width="7" height="5"/></symbol>
+      <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11.2v5M12 7.8v.4"/></symbol>
     </defs>
   </svg>
 
@@ -86,14 +90,22 @@
 
       <main class="content">
         <section class="welcome" hidden>
-          <div class="hero-tile"><svg><use href="#i-file"/></svg></div>
+          <img class="welcome-mark" src="assets/mark.png" alt="" width="92" height="92" />
           <h1 class="wordmark">Markdown</h1>
           <p class="tagline">A calm place to read and write. Open a file, pick a folder, or drop a document anywhere in this window.</p>
-          <div class="dashed"></div>
-          <div class="suggestions"></div>
           <div class="welcome-actions">
-            <button class="btn btn-primary" data-action="open-file">Open file <kbd>Ctrl O</kbd></button>
-            <button class="btn" data-action="open-folder">Open folder</button>
+            <button class="btn btn-primary" data-action="new-file"><svg><use href="#i-plus"/></svg>New file <kbd>Ctrl N</kbd></button>
+            <button class="btn" data-action="open-file"><svg><use href="#i-file"/></svg>Open file <kbd>Ctrl O</kbd></button>
+            <button class="btn" data-action="open-folder"><svg><use href="#i-folder-plus"/></svg>Open folder</button>
+            <button class="btn" data-action="new-window"><svg><use href="#i-window"/></svg>New window</button>
+          </div>
+          <div class="welcome-history">
+            <div class="wh-head">
+              <h2>History</h2>
+              <button class="btn btn-ghost" data-action="history">See all</button>
+            </div>
+            <div class="history-list"></div>
+            <p class="history-empty" hidden>No recent files yet. Files you open will show up here.</p>
           </div>
         </section>
 
@@ -105,6 +117,16 @@
           <div class="pane preview-pane">
             <article class="md"></article>
           </div>
+        </section>
+
+        <section class="history" hidden>
+          <div class="history-head">
+            <h1>History</h1>
+            <span class="history-count"></span>
+            <button class="icon-btn" data-action="history-close" data-tip="Back" data-key="Esc" aria-label="Close history"><svg><use href="#i-x"/></svg></button>
+          </div>
+          <div class="history-list"></div>
+          <p class="history-empty" hidden>No recent files yet. Files you open will show up here.</p>
         </section>
 
         <div class="findbar popover" role="search" hidden>
@@ -208,6 +230,30 @@
       <button class="btn btn-outline" value="cancel">Cancel</button>
       <button class="btn btn-primary" value="save">Save</button>
     </div>
+  </dialog>
+
+  <dialog class="dialog dlg-palette" aria-label="Command palette">
+    <div class="palette-box">
+      <label class="search-field palette-field">
+        <svg><use href="#i-search"/></svg>
+        <input class="palette-input" type="text" placeholder="Type a command" spellcheck="false" aria-label="Type a command" />
+      </label>
+      <div class="palette-list"></div>
+      <div class="palette-foot">
+        <span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>
+        <span><kbd>Enter</kbd> run</span>
+        <span><kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </dialog>
+
+  <dialog class="dialog dlg-about" aria-labelledby="about-title">
+    <img class="about-mark" src="assets/mark.png" alt="" width="76" height="76" />
+    <h2 id="about-title" class="about-name">Markdown</h2>
+    <p class="about-version">Version <span class="about-ver">—</span></p>
+    <p class="about-desc">A calm Markdown viewer and editor for the desktop. Read, edit with a live preview, and export to PDF.</p>
+    <p class="about-built">Built with Tauri</p>
+    <div class="about-foot"><button class="btn btn-outline" data-action="dialog-close">Close</button></div>
   </dialog>
 </body>
 </html>

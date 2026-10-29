@@ -24,7 +24,17 @@ const el = {
   sbClear: $('[data-action="clear-search"]'),
   sbList: $(".sb-list"),
   welcome: $(".welcome"),
-  suggestions: $(".suggestions"),
+  welcomeList: $(".welcome .history-list"),
+  welcomeEmpty: $(".welcome .history-empty"),
+  history: $(".history"),
+  historyList: $(".history .history-list"),
+  historyEmpty: $(".history .history-empty"),
+  historyCount: $(".history-count"),
+  paletteDlg: $(".dlg-palette"),
+  paletteInput: $(".palette-input"),
+  paletteList: $(".palette-list"),
+  aboutDlg: $(".dlg-about"),
+  aboutVer: $(".about-ver"),
   doc: $(".doc"),
   editor: $(".editor"),
   previewPane: $(".preview-pane"),
@@ -73,6 +83,7 @@ const store = {
 
 const state = {
   path: null,       // open file
+  untitled: false,  // new-file buffer not saved anywhere yet
   saved: "",        // content on disk
   text: "",         // content in editor
   mode: store.get("mode", "read"),
@@ -91,7 +102,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const svg = (name) => `<svg><use href="#i-${name}"/></svg>`;
 const baseName = (p) => p.split(/[\\/]/).pop();
 const dirName = (p) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))) || p;
-const isDirty = () => state.path !== null && state.text !== state.saved;
+const isDirty = () => (state.path !== null || state.untitled) && state.text !== state.saved;
 
 function prettyDir(p) {
   let d = dirName(p);
@@ -115,6 +126,7 @@ function tileColor(p) {
 function resolveLocal(ref) {
   const p = decodeURIComponent(ref.replace(/^file:\/\//i, "").split(/[?#]/)[0]);
   if (/^([\\/]|[a-z]:[\\/])/i.test(p)) return p;
+  if (!state.path) return p; // untitled buffers have no folder to resolve against
   const sep = state.path.includes("\\") ? "\\" : "/";
   const parts = dirName(state.path).split(/[\\/]/);
   for (const seg of p.split(/[\\/]/)) {
@@ -206,6 +218,13 @@ function openSettings() {
   }, () => { fontsLoaded = false; });
 }
 
+async function openAbout() {
+  try {
+    el.aboutVer.textContent = await invoke("app_version");
+  } catch { /* keep the placeholder dash */ }
+  el.aboutDlg.showModal();
+}
+
 // ---------- font picker (searchable dropdown) ----------
 let fonts = [];
 const fontMenu = { input: null, items: [], active: -1 };
@@ -284,7 +303,7 @@ el.fontMenu.addEventListener("mousedown", (e) => {
 // ---------- unsaved changes dialog ----------
 function confirmUnsaved() {
   if (!isDirty()) return Promise.resolve("discard");
-  $("h2", el.confirmDlg).textContent = `Save changes to “${baseName(state.path)}”?`;
+  $("h2", el.confirmDlg).textContent = `Save changes to “${state.path ? baseName(state.path) : "Untitled"}”?`;
   el.confirmDlg.returnValue = "cancel";
   el.confirmDlg.showModal();
   $('[value="save"]', el.confirmDlg).focus();
@@ -313,6 +332,7 @@ function removeRecent(p) {
   store.set("recents", state.recents);
   renderSidebar();
   renderWelcome();
+  renderHistory();
 }
 
 // ---------- opening / saving ----------
@@ -333,7 +353,7 @@ async function openFile(p, { fragment = null, find: query = null, line = null, q
     if (state.recents.includes(p)) removeRecent(p);
     return false;
   }
-  Object.assign(state, { path: p, saved: text, text });
+  Object.assign(state, { path: p, saved: text, text, untitled: false });
   renderSrc = null; // relative images resolve against the new file's folder
   el.editor.value = text;
   resetHistory();
@@ -351,7 +371,7 @@ async function openFile(p, { fragment = null, find: query = null, line = null, q
 }
 
 async function save() {
-  if (!state.path) return false;
+  if (!state.path) return saveAs();
   try {
     await invoke("write_file", { path: state.path, contents: state.text });
   } catch (err) {
@@ -362,6 +382,47 @@ async function save() {
   updateChrome();
   el.stSave.innerHTML = `${svg("check")}Saved`;
   return true;
+}
+
+async function saveAs() {
+  const p = await dialog.save({ defaultPath: "Untitled.md", filters: [{ name: "Markdown", extensions: ["md", "markdown", "mdx"] }] });
+  if (!p) return false;
+  const path = MD_RE.test(p) ? p : p + ".md";
+  try {
+    await invoke("write_file", { path, contents: state.text });
+  } catch (err) {
+    toast(`Couldn't save “${baseName(path)}”. ${err}`, "error");
+    return false;
+  }
+  Object.assign(state, { path, saved: state.text, untitled: false });
+  addRecent(path);
+  store.set("lastFile", path);
+  revealInTree(path);
+  renderSrc = null; // relative images now resolve against the new file's folder
+  renderPreview();
+  renderSidebar();
+  updateChrome();
+  el.stSave.innerHTML = `${svg("check")}Saved`;
+  return true;
+}
+
+async function newFile() {
+  if (!(await settleUnsaved())) return;
+  Object.assign(state, { path: null, untitled: true, saved: "", text: "" });
+  renderSrc = null;
+  el.editor.value = "";
+  resetHistory();
+  showDoc();
+  setMode("edit");
+  renderPreview();
+}
+
+async function newWindow() {
+  try {
+    await invoke("new_window");
+  } catch (err) {
+    toast(`Couldn't open a new window. ${err}`, "error");
+  }
 }
 
 async function pickFile() {
@@ -547,6 +608,7 @@ async function renderMermaid(block) {
 
 function showDoc() {
   el.welcome.hidden = true;
+  el.history.hidden = true;
   el.doc.hidden = false;
   el.status.hidden = false;
   el.tbDoc.hidden = false;
@@ -573,7 +635,7 @@ function setMode(mode) {
 
 let shownDirty = false;
 function updateChrome() {
-  const name = state.path ? baseName(state.path) : "Markdown";
+  const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : "Markdown";
   shownDirty = isDirty();
   el.docName.textContent = name;
   el.docName.title = state.path || "";
@@ -1118,18 +1180,46 @@ el.sbList.addEventListener("scroll", hideMenu);
 addEventListener("blur", hideMenu);
 addEventListener("resize", hideMenu);
 
-// ---------- welcome ----------
-function renderWelcome() {
-  el.suggestions.innerHTML = state.recents.slice(0, 3).map((p) =>
-    `<button class="suggestion" data-path="${escapeHtml(p)}" title="${escapeHtml(p)}">
+// ---------- welcome & history ----------
+function historyRow(p) {
+  return `<div class="history-item">
+    <button class="history-row" data-action="open-history" data-path="${escapeHtml(p)}" title="${escapeHtml(p)}">
       <span class="icon-tile" style="--tile:${tileColor(p)}">${svg("file")}</span>
       <span class="nav-text"><span class="nav-name">${escapeHtml(baseName(p))}</span><span class="nav-sub">${escapeHtml(prettyDir(p))}</span></span>
-      ${svg("chevron")}</button>`).join("");
+      ${svg("chevron")}</button>
+    <button class="history-x" data-action="remove-history" data-path="${escapeHtml(p)}" data-tip="Remove from history" aria-label="Remove from history">${svg("x")}</button>
+  </div>`;
 }
-el.suggestions.addEventListener("click", (e) => {
-  const b = e.target.closest("[data-path]");
-  if (b) openFile(b.dataset.path);
-});
+
+function renderHistoryList(container) {
+  container.innerHTML = state.recents.map(historyRow).join("");
+}
+
+function renderWelcome() {
+  renderHistoryList(el.welcomeList);
+  el.welcomeEmpty.hidden = state.recents.length > 0;
+}
+
+function renderHistory() {
+  renderHistoryList(el.historyList);
+  el.historyEmpty.hidden = state.recents.length > 0;
+  el.historyCount.textContent = `${state.recents.length} ${state.recents.length === 1 ? "file" : "files"}`;
+}
+
+function openHistory() {
+  el.welcome.hidden = true;
+  el.doc.hidden = true;
+  el.status.hidden = true;
+  el.tbDoc.hidden = true;
+  el.history.hidden = false;
+  renderHistory();
+}
+
+function closeHistory() {
+  el.history.hidden = true;
+  if (state.path || state.untitled) showDoc();
+  else { renderWelcome(); el.welcome.hidden = false; }
+}
 
 // ---------- sidebar layout ----------
 const narrow = matchMedia("(max-width: 720px)");
@@ -1204,6 +1294,13 @@ const actions = {
   "replace-all": replaceAll,
   pdf: exportPdf,
   settings: openSettings,
+  "new-file": newFile,
+  "new-window": newWindow,
+  "save-as": saveAs,
+  history: openHistory,
+  "history-close": closeHistory,
+  "open-history": (b) => openFile(b.dataset.path),
+  "remove-history": (b) => removeRecent(b.dataset.path),
   "dialog-close": (b) => b.closest("dialog").close(),
   minimize: () => appWindow.minimize(),
   maximize: () => appWindow.toggleMaximize(),
@@ -1218,15 +1315,133 @@ document.addEventListener("click", (e) => {
 });
 
 async function exportPdf() {
-  if (!state.path) return;
+  if (el.doc.hidden) return;
   closeFind();
   await renderPreview(); // make sure the printed preview matches the editor
   try { await invoke("print_page"); } catch (err) { toast(`Couldn't open the print dialog. ${err}`, "error"); }
 }
 
+// ---------- command palette ----------
+const PALETTE_GROUPS = ["File", "Editor", "View", "Preferences", "Help"];
+let paletteMatches = [];
+let paletteSel = 0;
+
+function paletteCommands() {
+  const hasDoc = !!(state.path || state.untitled);
+  return [
+    { group: "File", icon: "plus", title: "New File", key: "Ctrl N", keywords: "create blank untitled document", run: newFile },
+    { group: "File", icon: "window", title: "New Window", key: "Ctrl Shift N", keywords: "another second instance blank", run: newWindow },
+    { group: "File", icon: "file", title: "Open File", key: "Ctrl O", keywords: "browse load document", run: pickFile },
+    { group: "File", icon: "folder-plus", title: "Open Folder", key: "Ctrl Shift O", keywords: "directory workspace tree", run: pickFolder },
+    { group: "File", icon: "save", title: "Save", key: "Ctrl S", keywords: "write store disk", on: hasDoc, run: () => save().then((ok) => ok && toast("Saved")) },
+    { group: "File", icon: "save", title: "Save As", keywords: "write store disk copy new name", on: hasDoc, run: saveAs },
+    { group: "File", icon: "pdf", title: "Print / Export PDF", key: "Ctrl P", keywords: "print export pdf paper", on: hasDoc, run: exportPdf },
+    { group: "File", icon: "clock", title: "Open History", keywords: "recent files last opened", run: openHistory },
+    { group: "Editor", icon: "read", title: "Read Mode", key: "Alt R", keywords: "view preview rendered", on: hasDoc, run: () => setMode("read") },
+    { group: "Editor", icon: "split", title: "Split Mode", key: "Alt S", keywords: "side by side live preview", on: hasDoc, run: () => setMode("split") },
+    { group: "Editor", icon: "edit", title: "Edit Mode", key: "Alt E", keywords: "source write textarea", on: hasDoc, run: () => setMode("edit") },
+    { group: "Editor", icon: "refresh", title: "Cycle View Mode", key: "Ctrl E", keywords: "switch rotate toggle view", on: hasDoc, run: () => setMode({ read: "split", split: "edit", edit: "read" }[state.mode]) },
+    { group: "Editor", icon: "search", title: "Find", key: "Ctrl F", keywords: "search text locate", on: hasDoc, run: () => openFind() },
+    { group: "Editor", icon: "replace", title: "Find & Replace", key: "Ctrl H", keywords: "search substitute swap", on: hasDoc, run: () => openFind(undefined, { replace: true }) },
+    { group: "View", icon: "sidebar", title: "Toggle Sidebar", key: "Ctrl B", keywords: "files panel hide show tree", run: toggleSidebar },
+    { group: "Preferences", icon: "settings", title: "Settings", key: "Ctrl ,", keywords: "preferences appearance theme themes dark light accent color font fonts typography typeface size reading width interface document editor", run: openSettings },
+    { group: "Help", icon: "info", title: "About Markdown", keywords: "version about info credits app", run: openAbout },
+  ];
+}
+
+/** Literal substring hits always outrank subsequence hits; both beat no match (-1). */
+function fuzzyScore(s, q) {
+  if (!q) return 0;
+  const lit = s.indexOf(q);
+  if (lit !== -1) return 100 - Math.min(lit, 20);
+  let score = 0, at = 0;
+  for (const ch of q) {
+    const i = s.indexOf(ch, at);
+    if (i === -1) return -1;
+    score += i === at ? 3 : s[i - 1] === " " ? 2 : 1;
+    at = i + 1;
+  }
+  return score;
+}
+
+function renderPalette() {
+  const q = el.paletteInput.value.trim().toLowerCase();
+  paletteMatches = paletteCommands()
+    .map((c, i) => ({ c, i, s: fuzzyScore(`${c.title} ${c.keywords || ""}`.toLowerCase(), q) }))
+    .filter((x) => x.s >= 0)
+    .sort((a, b) => b.s - a.s || a.i - b.i);
+  paletteMatches.forEach((x, mi) => (x.mi = mi));
+  const groups = PALETTE_GROUPS
+    .map((g, gi) => ({ g, gi, rows: paletteMatches.filter((x) => x.c.group === g) }))
+    .filter((x) => x.rows.length);
+  // While searching, float the group holding the best match to the top (so Enter runs it);
+  // with no query, keep the familiar menu order.
+  if (q) groups.sort((a, b) => b.rows[0].s - a.rows[0].s || a.gi - b.gi);
+  el.paletteList.innerHTML = groups.map(({ g, rows }) =>
+    `<div class="pg-label">${g}</div><div class="pg-box">` + rows.map((x) => {
+      const c = x.c;
+      return `<button class="palette-row${c.on === false ? " is-disabled" : ""}" data-mi="${x.mi}">
+        ${svg(c.icon)}<span class="pr-title">${escapeHtml(c.title)}</span>${c.key ? `<kbd>${escapeHtml(c.key)}</kbd>` : ""}</button>`;
+    }).join("") + "</div>").join("") || `<div class="palette-empty">No matching commands</div>`;
+  selectPalette(0);
+}
+
+function paletteRows() {
+  return $$(".palette-row:not(.is-disabled)", el.paletteList);
+}
+
+function selectPalette(i) {
+  const rows = paletteRows();
+  if (!rows.length) return;
+  paletteSel = ((i % rows.length) + rows.length) % rows.length;
+  rows.forEach((r, n) => r.classList.toggle("is-active", n === paletteSel));
+  rows[paletteSel].scrollIntoView({ block: "nearest" });
+}
+
+function runPalette(mi) {
+  const x = paletteMatches[mi];
+  if (!x || x.c.on === false) return;
+  closePalette();
+  x.c.run();
+}
+
+function openPalette() {
+  el.paletteInput.value = "";
+  renderPalette();
+  el.paletteDlg.showModal();
+  el.paletteInput.focus();
+}
+
+function closePalette() {
+  el.paletteDlg.close();
+}
+
+el.paletteInput.addEventListener("input", renderPalette);
+el.paletteInput.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown") { e.preventDefault(); selectPalette(paletteSel + 1); }
+  else if (e.key === "ArrowUp") { e.preventDefault(); selectPalette(paletteSel - 1); }
+  else if (e.key === "Enter") {
+    e.preventDefault();
+    const row = paletteRows()[paletteSel];
+    if (row) runPalette(+row.dataset.mi);
+  }
+});
+el.paletteList.addEventListener("click", (e) => {
+  const row = e.target.closest(".palette-row");
+  if (row) runPalette(+row.dataset.mi);
+});
+el.paletteList.addEventListener("mouseover", (e) => {
+  const row = e.target.closest(".palette-row:not(.is-disabled)");
+  if (row) selectPalette(paletteRows().indexOf(row));
+});
+el.paletteDlg.addEventListener("click", (e) => {
+  if (e.target === el.paletteDlg) closePalette(); // click on the backdrop
+});
+
 document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
   if (e.key === "Escape" && el.win.dataset.sidebar === "overlay") el.win.dataset.sidebar = "";
+  if (e.key === "Escape" && !el.history.hidden) { closeHistory(); return; }
   if (e.key === "Escape" && !el.findbar.hidden && !e.defaultPrevented) { closeFind(); return; }
   if (e.key === "F3" || (mod && e.key.toLowerCase() === "g")) {
     e.preventDefault();
@@ -1245,7 +1460,8 @@ document.addEventListener("keydown", (e) => {
     s: () => save().then((ok) => ok && toast("Saved")),
     f: () => (e.shiftKey ? (el.win.dataset.sidebar === "closed" && toggleSidebar(), narrow.matches && (el.win.dataset.sidebar = "overlay"), el.sbSearch.focus(), el.sbSearch.select()) : openFind()),
     h: () => openFind(undefined, { replace: true }),
-    p: exportPdf,
+    p: () => (e.shiftKey ? openPalette() : exportPdf()),
+    n: () => (e.shiftKey ? newWindow() : newFile()),
     e: () => state.path && setMode({ read: "split", split: "edit", edit: "read" }[state.mode]),
     b: toggleSidebar,
     ",": actions.settings,
@@ -1284,7 +1500,9 @@ webview.onDragDropEvent((e) => {
   const w = store.get("sidebarW", null);
   if (w) el.root.style.setProperty("--sidebar-w", w);
   if (!narrow.matches && store.get("sidebarClosed", false)) el.win.dataset.sidebar = "closed";
-  const initialReq = invoke("initial_file"); // start the document fetch before anything else
+  // A window opened via New Window (?fresh=1) starts blank: no CLI-arg file, no last-file restore.
+  const fresh = new URLSearchParams(location.search).has("fresh");
+  const initialReq = fresh ? Promise.resolve(null) : invoke("initial_file"); // start the document fetch before anything else
   renderSidebar();
   syncMaximized();
   if (state.folder) loadTree().catch(() => setFolder(null));
@@ -1296,7 +1514,7 @@ webview.onDragDropEvent((e) => {
     renderWelcome();
     if (state.path) updateChrome();
   }, () => { /* fall back to full paths */ });
-  const initial = (await initialReq) || store.get("lastFile", null);
+  const initial = fresh ? null : (await initialReq) || store.get("lastFile", null);
   // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
   if (!initial || !(await openFile(initial, { quiet: true }))) {
     renderWelcome();
