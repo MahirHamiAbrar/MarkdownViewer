@@ -12,6 +12,9 @@ use comrak::{markdown_to_html_with_plugins, Options};
 use serde::Serialize;
 use tauri::Manager;
 
+mod ai;
+mod chats;
+
 /// Syntect is the slowest step of a render; the preview re-renders on every edit, so
 /// unchanged code blocks reuse their highlighted HTML.
 struct CachedHighlighter {
@@ -283,6 +286,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .manage(ai::AiState::default())
         .invoke_handler(tauri::generate_handler![
             render_markdown,
             read_file,
@@ -293,7 +297,16 @@ pub fn run() {
             new_window,
             list_markdown,
             search_files,
-            list_fonts
+            list_fonts,
+            ai::ai_chat,
+            ai::ai_cancel,
+            ai::ai_title,
+            ai::ai_status,
+            ai::ai_set_key,
+            chats::chats_list,
+            chats::chat_load,
+            chats::chat_save,
+            chats::chat_delete
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

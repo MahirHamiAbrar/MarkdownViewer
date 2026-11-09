@@ -1,6 +1,7 @@
 "use strict";
 
-const { invoke, convertFileSrc } = window.__TAURI__.core;
+const { invoke, convertFileSrc, Channel } = window.__TAURI__.core;
+
 const dialog = window.__TAURI__.dialog;
 const opener = window.__TAURI__.opener;
 const tpath = window.__TAURI__.path; // only for homeDir at boot: per-render IPC calls add latency
@@ -59,6 +60,29 @@ const el = {
   confirmDlg: $(".dlg-confirm"),
   swatches: $(".swatches"),
   fontMenu: $(".font-menu"),
+  aiPanel: $(".ai-panel"),
+  aiSplitter: $(".ai-splitter"),
+  aiMessages: $(".ai-messages"),
+  aiHistory: $(".ai-history"),
+  aiHistoryList: $(".ai-history-list"),
+  aiTitle: $(".ai-title"),
+  aiTitleInput: $(".ai-title-input"),
+  aiEffortLabel: $(".ai-effort-label"),
+  aiCtx: $(".ai-context"),
+  aiChipFile: $(".ai-chip-file"),
+  aiChipSel: $(".ai-chip-sel"),
+  aiChipReply: $(".ai-chip-reply"),
+  aiChatTotal: $(".ai-chat-total"),
+  aiComposer: $(".ai-composer"),
+  aiInput: $(".ai-input"),
+  aiSend: $(".ai-send"),
+  aiStop: $(".ai-stop"),
+  aiSelChip: $(".ai-selchip"),
+  aiMenu: $(".ai-menu"),
+  aiKeyInput: $(".ai-key-input"),
+  aiKeyStatus: $(".ai-key-status"),
+  aiDelDlg: $(".dlg-ai-delete"),
+  aiDelName: $(".ai-del-name"),
 };
 
 const MD_RE = /\.(md|markdown|mdx)$/i;
@@ -70,6 +94,13 @@ const ACCENTS = {
 // Setting -> [CSS variable, what it falls back to]
 const FONT_VARS = { fontUi: ["--font-ui", "--font-ui-base"], fontEditor: ["--font-editor", "--font-mono"], fontView: ["--font-view", "--font-ui"] };
 const TILE_COLORS = ["#2F80F5", "#F5822E", "#27B5C9", "#8C7CF0", "#F26B8A", "#4F7CF0", "#35B864", "#6B7384"];
+const AI_MODEL = "deepseek/deepseek-v4.1-flash";
+const AI_MODEL_NAME = "DeepSeek V4.1 Flash";
+const AI_EFFORTS = [["off", "Off"], ["low", "Low"], ["high", "High"], ["max", "Max"]];
+const AI_MAX_DOC = 200_000;
+const AI_MAX_REASONING = 100_000;
+const AI_MAX_HISTORY = 50;
+const aiEffortName = (value) => (AI_EFFORTS.find(([v]) => v === value) || ["high", "High"])[1];
 
 // ---------- persistence (localStorage, per-viewer conveniences) ----------
 const store = {
@@ -91,9 +122,13 @@ const state = {
   folder: store.get("folder", null),
   tree: [],
   expanded: new Set(),
-  settings: { theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", ...store.get("settings", {}) },
+  settings: { theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", ...store.get("settings", {}) },
   home: "",
   sep: "/",
+  ai: {
+    open: false, chat: null, list: [], streaming: false, requestId: null, selection: null, reply: null,
+    renderTimer: null, pinned: true, current: null, chip: null, deleteTarget: null, titleBusy: false,
+  },
 };
 
 // ---------- small helpers ----------
@@ -181,6 +216,7 @@ function applySettings() {
     for (const b of $$("button", seg)) b.setAttribute("aria-checked", String(b.dataset.value === s[seg.dataset.setting]));
   }
   for (const b of $$(".swatch")) b.setAttribute("aria-checked", String(b.dataset.accent === s.accent));
+  el.aiEffortLabel.textContent = aiEffortName(s.aiEffort);
   store.set("settings", s);
   if (mermaidTheme && mermaidTheme !== `${el.root.dataset.theme}|${el.root.dataset.palette}|${el.root.dataset.accent}`) {
     for (const block of $$(".mermaid-block", el.preview)) renderMermaid(block);
@@ -197,7 +233,11 @@ el.settingsDlg.addEventListener("click", (e) => {
   const sw = e.target.closest(".swatch");
   if (sw) state.settings.accent = sw.dataset.accent;
   const seg = e.target.closest("[data-setting] button");
-  if (seg) state.settings[seg.parentElement.dataset.setting] = seg.dataset.value;
+  if (seg) {
+    const key = seg.parentElement.dataset.setting;
+    if (key === "aiEffort") { setAiEffort(seg.dataset.value); return; }
+    state.settings[key] = seg.dataset.value;
+  }
   if (sw || seg) applySettings();
 });
 function setFont(input, name) {
@@ -209,6 +249,8 @@ let fontsLoaded = false;
 function openSettings() {
   applySettings();
   for (const input of $$("[data-font]", el.settingsDlg)) input.value = state.settings[input.dataset.font];
+  el.aiKeyInput.value = "";
+  refreshAiStatus();
   el.settingsDlg.showModal();
   if (fontsLoaded) return;
   fontsLoaded = true;
@@ -511,16 +553,9 @@ function patchPreview(html) {
   if (findOpen) runFind(el.findInput.value, { keepIndex: true, scroll: false });
 }
 
-function decoratePreview(root) {
-  for (const a of $$("a[href]", root)) {
-    if (/^(https?:|mailto:)/i.test(a.getAttribute("href"))) a.classList.add("external");
-  }
-  for (const img of $$("img[src]", root)) {
-    const src = img.getAttribute("src");
-    if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src) && !src.startsWith("file:")) continue;
-    try { img.src = convertFileSrc(resolveLocal(src)); } catch { /* leave the broken image as-is */ }
-  }
+function decorateRich(root, { mermaid = false } = {}) {
   for (const pre of $$("pre", root)) {
+    if (pre.parentElement?.classList.contains("code-block")) continue;
     const wrap = document.createElement("div");
     wrap.className = "code-block";
     pre.replaceWith(wrap);
@@ -528,7 +563,7 @@ function decoratePreview(root) {
     // Info strings like "ts#index.ts" name the file after the language.
     const info = ($("code", pre)?.className.match(/language-(\S+)/) || [])[1] || "";
     const [, lang, file] = info.match(/^(.*?)(?:#(.+))?$/);
-    if (lang === "mermaid") {
+    if (mermaid && lang === "mermaid") {
       wrap.classList.add("mermaid-block");
       wrap.dataset.src = pre.textContent;
       renderMermaid(wrap);
@@ -548,11 +583,24 @@ function decoratePreview(root) {
     wrap.append(tools);
   }
   for (const table of $$("table", root)) {
+    if (table.parentElement?.classList.contains("table-wrap")) continue;
     const wrap = document.createElement("div");
     wrap.className = "table-wrap";
     table.replaceWith(wrap);
     wrap.append(table);
   }
+}
+
+function decoratePreview(root) {
+  for (const a of $$("a[href]", root)) {
+    if (/^(https?:|mailto:)/i.test(a.getAttribute("href"))) a.classList.add("external");
+  }
+  for (const img of $$("img[src]", root)) {
+    const src = img.getAttribute("src");
+    if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src) && !src.startsWith("file:")) continue;
+    try { img.src = convertFileSrc(resolveLocal(src)); } catch { /* leave the broken image as-is */ }
+  }
+  decorateRich(root, { mermaid: true });
 }
 
 // ---------- mermaid (~5 MB, so it loads with the first diagram, never at startup) ----------
@@ -645,6 +693,7 @@ function updateChrome() {
   el.stPath.textContent = state.path ? prettyDir(state.path) + state.sep + name : "";
   el.stPath.title = state.path || "";
   updateStatus();
+  updateAiChrome();
 }
 
 function updateStatus() {
@@ -1301,6 +1350,17 @@ const actions = {
   "history-close": closeHistory,
   "open-history": (b) => openFile(b.dataset.path),
   "remove-history": (b) => removeRecent(b.dataset.path),
+  "toggle-ai": toggleAiPanel,
+  "ai-new": newAiChat,
+  "ai-history": openAiHistory,
+  "ai-history-close": closeAiHistory,
+  "ai-rename": startAiRename,
+  "ai-effort-menu": (b) => (el.aiMenu.hidden ? openAiEffortMenu(b) : closeAiEffortMenu()),
+  "ai-stop": stopAi,
+  "ai-save-key": saveAiKey,
+  "ai-clear-key": clearAiKey,
+  "ai-clear-selection": () => { state.ai.selection = null; updateAiChrome(); el.aiInput.focus(); },
+  "ai-clear-reply": () => { state.ai.reply = null; updateAiChrome(); el.aiInput.focus(); },
   "dialog-close": (b) => b.closest("dialog").close(),
   minimize: () => appWindow.minimize(),
   maximize: () => appWindow.toggleMaximize(),
@@ -1322,7 +1382,7 @@ async function exportPdf() {
 }
 
 // ---------- command palette ----------
-const PALETTE_GROUPS = ["File", "Editor", "View", "Preferences", "Help"];
+const PALETTE_GROUPS = ["File", "Editor", "View", "Mark", "Preferences", "Help"];
 let paletteMatches = [];
 let paletteSel = 0;
 
@@ -1344,6 +1404,9 @@ function paletteCommands() {
     { group: "Editor", icon: "search", title: "Find", key: "Ctrl F", keywords: "search text locate", on: hasDoc, run: () => openFind() },
     { group: "Editor", icon: "replace", title: "Find & Replace", key: "Ctrl H", keywords: "search substitute swap", on: hasDoc, run: () => openFind(undefined, { replace: true }) },
     { group: "View", icon: "sidebar", title: "Toggle Sidebar", key: "Ctrl B", keywords: "files panel hide show tree", run: toggleSidebar },
+    { group: "Mark", icon: "sparkle", title: "Toggle Mark", key: "Ctrl Shift M", keywords: "ai assistant chat sidebar panel", run: toggleAiPanel },
+    { group: "Mark", icon: "plus", title: "New Chat with Mark", keywords: "ai assistant conversation clean", run: () => { openAiPanel(); newAiChat(); } },
+    { group: "Mark", icon: "clock", title: "Mark Chat History", keywords: "ai assistant saved chats conversations", run: () => openAiHistory() },
     { group: "Preferences", icon: "settings", title: "Settings", key: "Ctrl ,", keywords: "preferences appearance theme themes dark light accent color font fonts typography typeface size reading width interface document editor", run: openSettings },
     { group: "Help", icon: "info", title: "About Markdown", keywords: "version about info credits app", run: openAbout },
   ];
@@ -1441,6 +1504,9 @@ el.paletteDlg.addEventListener("click", (e) => {
 document.addEventListener("keydown", (e) => {
   const mod = e.ctrlKey || e.metaKey;
   if (e.key === "Escape" && el.win.dataset.sidebar === "overlay") el.win.dataset.sidebar = "";
+  if (e.key === "Escape" && !el.aiSelChip.hidden) { hideSelChip(); return; }
+  if (e.key === "Escape" && !el.aiHistory.hidden) { closeAiHistory(); return; }
+  if (e.key === "Escape" && !el.aiMenu.hidden) { closeAiEffortMenu(); return; }
   if (e.key === "Escape" && !el.history.hidden) { closeHistory(); return; }
   if (e.key === "Escape" && !el.findbar.hidden && !e.defaultPrevented) { closeFind(); return; }
   if (e.key === "F3" || (mod && e.key.toLowerCase() === "g")) {
@@ -1455,6 +1521,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (!mod || e.altKey || document.querySelector("dialog[open]")) return;
+  if (e.shiftKey && k === "m") { e.preventDefault(); toggleAiPanel(); return; }
   const run = {
     o: () => (e.shiftKey ? pickFolder() : pickFile()),
     s: () => save().then((ok) => ok && toast("Saved")),
@@ -1467,6 +1534,1211 @@ document.addEventListener("keydown", (e) => {
     ",": actions.settings,
   }[k];
   if (run) { e.preventDefault(); run(); }
+});
+
+// ---------- Mark (AI) ----------
+function nanoid8() {
+  const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-";
+  const bytes = new Uint8Array(8);
+  crypto.getRandomValues(bytes);
+  let id = "";
+  for (const byte of bytes) id += alphabet[byte & 63];
+  return id;
+}
+
+function localDate(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function dateLabel(date) {
+  const now = new Date();
+  const today = localDate(now);
+  const yesterday = localDate(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1));
+  if (date === today) return "Today";
+  if (date === yesterday) return "Yesterday";
+  const parsed = new Date(`${date}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? date : parsed.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}
+
+function fmtDuration(ms) {
+  if (!ms) return "";
+  return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
+}
+
+const fmtCount = (n) => (n >= 1000 ? `${(n / 1000).toFixed(n >= 10_000 ? 0 : 1)}k` : String(n || 0));
+
+function formatCost(cost) {
+  if (cost == null || !Number.isFinite(cost)) return "";
+  if (cost === 0) return "$0";
+  const digits = cost < 0.001 ? 8 : cost < 0.01 ? 6 : cost < 1 ? 4 : 2;
+  return `$${cost.toFixed(digits).replace(/0+$/, "").replace(/\.$/, "")}`;
+}
+
+function usageParts(usage, { compact = false } = {}) {
+  const fmt = compact ? fmtCount : (n) => Number(n || 0).toLocaleString();
+  const parts = [`${fmt(usage.input)} in`, `${fmt(usage.output)} out`];
+  if (usage.reasoning) parts.push(`${fmt(usage.reasoning)} thinking`);
+  if (usage.cost != null) parts.push(formatCost(usage.cost));
+  return parts;
+}
+
+function recalcChatUsage(chat) {
+  const total = { input: 0, output: 0, reasoning: 0, cost: null };
+  let seen = false;
+  for (const message of chat.messages || []) {
+    if (message.role !== "assistant" || !message.usage) continue;
+    seen = true;
+    total.input += message.usage.input || 0;
+    total.output += message.usage.output || 0;
+    total.reasoning += message.usage.reasoning || 0;
+    if (message.usage.cost != null) total.cost = (total.cost || 0) + message.usage.cost;
+  }
+  if (seen) chat.usage = total;
+  return chat.usage;
+}
+
+function currentFileMeta() {
+  const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : null;
+  return name ? { path: state.path, name } : null;
+}
+
+function selectionDetail(selection) {
+  if (!selection) return "";
+  const where = selection.lines ? `Lines ${selection.lines[0]}–${selection.lines[1]}` : selection.source === "preview" ? "Selected text" : "Selection";
+  return selection.heading ? `${where} · ${selection.heading}` : where;
+}
+
+function updateAiChrome() {
+  const chat = state.ai.chat;
+  el.aiTitle.textContent = chat?.title || "New chat";
+  el.aiEffortLabel.textContent = aiEffortName(state.settings.aiEffort);
+  const file = currentFileMeta();
+  el.aiChipFile.hidden = !file;
+  if (file) {
+    $(".ai-chip-text", el.aiChipFile).textContent = file.name;
+    el.aiChipFile.dataset.tip = file.path || file.name;
+    el.aiChipFile.title = file.path || file.name;
+  }
+  const selection = state.ai.selection;
+  el.aiChipSel.hidden = !selection;
+  if (selection) {
+    $(".ai-chip-text", el.aiChipSel).textContent = selection.lines ? `Selection · ${selection.lines[0]}–${selection.lines[1]}` : "Selection";
+    el.aiChipSel.title = selection.text.slice(0, 600);
+  }
+  const reply = state.ai.reply;
+  el.aiChipReply.hidden = !reply;
+  if (reply) {
+    $(".ai-chip-text", el.aiChipReply).textContent = `Reply · ${reply.snippet || reply.text.slice(0, 40)}`;
+    el.aiChipReply.title = reply.text.slice(0, 600);
+  }
+  el.aiCtx.hidden = !file && !selection && !reply;
+  const usage = chat?.usage;
+  if (usage && (usage.input || usage.output)) {
+    el.aiChatTotal.textContent = `This chat · ${usageParts(usage, { compact: true }).join(" · ")}`;
+    el.aiChatTotal.title = `Input ${usage.input.toLocaleString()} · Output ${usage.output.toLocaleString()}${usage.reasoning ? ` · Reasoning ${usage.reasoning.toLocaleString()}` : ""}${usage.cost != null ? ` · Cost ${formatCost(usage.cost)}` : ""}`;
+    el.aiChatTotal.hidden = false;
+  } else {
+    el.aiChatTotal.hidden = true;
+  }
+}
+
+function emptySuggestions() {
+  return currentFileMeta()
+    ? [
+        ["Summarize this document", "Summarize this document."],
+        ["Explain the structure", "Explain the structure of this document."],
+        ["Find TODOs and open questions", "Find TODOs and open questions in this document."],
+      ]
+    : [
+        ["What can you help me with?", "What can you help me with?"],
+        ["How do you use a document?", "How do you use the document I have open?"],
+        ["Give me a Markdown writing tip", "Give me a quick Markdown writing tip."],
+      ];
+}
+
+function renderAiEmpty() {
+  const file = currentFileMeta();
+  const suggestions = emptySuggestions();
+  el.aiMessages.innerHTML = `<div class="ai-empty">
+    <img src="assets/mark.png" alt="" width="56" height="56" />
+    <h2>Ask Mark</h2>
+    <p>${file ? `Mark can read <b>${escapeHtml(file.name)}</b> and answer in Markdown.` : "Open a file and Mark will read it with you."}</p>
+    <div class="ai-suggestions">${suggestions.map(([label, prompt]) =>
+      `<button class="ai-suggest" data-ai-prompt="${escapeHtml(prompt)}">${svg("sparkle")}${escapeHtml(label)}</button>`).join("")}</div>
+  </div>`;
+}
+
+function ensureChat() {
+  if (state.ai.chat) return state.ai.chat;
+  const now = new Date().toISOString();
+  state.ai.chat = {
+    version: 1,
+    id: nanoid8(),
+    date: localDate(),
+    title: "New chat",
+    titleEdited: false,
+    titleGenerated: false,
+    createdAt: now,
+    updatedAt: now,
+    file: currentFileMeta(),
+    model: AI_MODEL,
+    effort: state.settings.aiEffort,
+    messages: [],
+  };
+  return state.ai.chat;
+}
+
+async function saveAiChat() {
+  const chat = state.ai.chat;
+  if (!chat || !chat.messages.length) return;
+  chat.updatedAt = new Date().toISOString();
+  try {
+    await invoke("chat_save", { date: chat.date, id: chat.id, json: JSON.stringify(chat) });
+  } catch (err) {
+    toast(`Couldn't save this chat. ${err}`, "error");
+  }
+}
+
+function documentBlock() {
+  const file = currentFileMeta();
+  if (!file) return "No document is currently open. Answer from the conversation alone.";
+  const text = state.text || "";
+  const truncated = text.length > AI_MAX_DOC;
+  const dirty = state.path ? state.text !== state.saved : state.untitled;
+  return `Name: ${file.name}\nPath: ${file.path || "(unsaved buffer)"}${dirty ? " (unsaved edits)" : ""}\n\n<document>\n${truncated ? text.slice(0, AI_MAX_DOC) : text}\n</document>${truncated ? `\n\n[The document was truncated to its first ${AI_MAX_DOC} characters.]` : ""}`;
+}
+
+function systemPrompt() {
+  return `You are Mark, the built-in AI assistant in the Markdown desktop app. Help the user read, understand, and edit the document they have open. Reply in GitHub-flavored Markdown. Use fenced code blocks with language tags. Be concise and reference the document when useful.\n\n## Current document\n${documentBlock()}`;
+}
+
+function apiUserContent(message) {
+  const parts = [];
+  if (message.reply?.text) {
+    const who = message.reply.role === "assistant" ? "Mark's" : "the user's";
+    parts.push(`[Replying to this part of ${who} previous message]\n${message.reply.text}`);
+  }
+  if (message.selection?.text) {
+    const where = message.selection.lines ? `lines ${message.selection.lines[0]}–${message.selection.lines[1]}` : message.selection.heading || "the selection";
+    parts.push(`[Selected text — ${where}]\n${message.selection.text}`);
+  }
+  return parts.length ? `${parts.join("\n\n")}\n\n${message.content}` : message.content;
+}
+
+function buildApiMessages(chat) {
+  const history = chat.messages.filter((message) => !(message.role === "assistant" && !message.content)).slice(-AI_MAX_HISTORY);
+  return [
+    { role: "system", content: systemPrompt() },
+    ...history.map((message) => ({
+      role: message.role,
+      content: message.role === "user" ? apiUserContent(message) : message.content,
+    })),
+  ];
+}
+
+function seedActions(chat, effort) {
+  const file = currentFileMeta();
+  const actions = [file
+    ? { kind: "context", id: "context", label: `Read ${file.name}`, detail: `${fmtCount((state.text || "").length)} characters`, status: "done" }
+    : { kind: "context", id: "context", label: "No document open", detail: "Answering without file context", status: "done" }];
+  const lastUser = [...chat.messages].reverse().find((message) => message.role === "user");
+  if (lastUser?.selection?.text) {
+    actions.push({ kind: "selection", id: "selection", label: "Selection attached", detail: selectionDetail(lastUser.selection), status: "done" });
+  }
+  actions.push({ kind: "model", id: "model", label: AI_MODEL_NAME, detail: `effort ${aiEffortName(effort).toLowerCase()}`, status: "running" });
+  return actions;
+}
+
+function setAiPhase(node, text) {
+  const phase = $(".ai-phase", node);
+  if (!phase) return;
+  phase.hidden = !text;
+  if (text) phase.textContent = text;
+}
+
+function updateThinking(node, msg, streaming) {
+  const details = $(".ai-think", node);
+  const body = $(".ai-reasoning", node);
+  const label = $(".ai-think-label", node);
+  const text = msg.reasoning || "";
+  if (!text) {
+    details.hidden = true;
+    return;
+  }
+  details.hidden = false;
+  if (body.textContent !== text) {
+    const pinned = body.scrollHeight - body.scrollTop - body.clientHeight < 24;
+    body.textContent = text;
+    if (streaming && pinned) body.scrollTop = body.scrollHeight;
+  }
+  details.classList.toggle("streaming", Boolean(streaming));
+  if (streaming) {
+    label.textContent = "Thinking…";
+  } else {
+    const duration = msg.reasoningDurationMs || msg.timing?.durationMs || 0;
+    label.textContent = duration ? `Thought for ${fmtDuration(duration)}` : "Show reasoning";
+  }
+}
+
+function updateTrace(node, msg) {
+  const details = $(".ai-trace", node);
+  const list = $(".ai-trace-list", node);
+  const actions = msg.actions || [];
+  details.hidden = !actions.length;
+  if (!actions.length) return;
+  $(".ai-trace-count", node).textContent = String(actions.length);
+  details.classList.toggle("streaming", Boolean(state.ai.streaming && state.ai.current?.msg === msg));
+  list.innerHTML = actions.map((action) => {
+    const icon = action.kind === "context" ? "file" : action.kind === "selection" ? "sparkle" : action.kind === "model" ? "sparkle" : "activity";
+    const stateIcon = action.status === "error" ? "alert" : action.status === "running" ? "loader" : "check";
+    const label = action.label || action.name || "Action";
+    const detail = action.detail || "";
+    return `<li class="ai-trace-item" data-status="${escapeHtml(action.status || "done")}">
+      <span class="ai-trace-ico">${svg(icon)}</span>
+      <span class="ai-trace-text"><span class="ai-trace-label">${escapeHtml(label)}</span><span class="ai-trace-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span></span>
+      <span class="ai-trace-state">${svg(stateIcon)}</span>
+    </li>`;
+  }).join("");
+}
+
+function updateAiMeta(node, msg) {
+  const meta = $(".ai-meta", node);
+  const parts = [];
+  if (msg.timing?.durationMs) parts.push(fmtDuration(msg.timing.durationMs));
+  if (msg.usage) parts.push(...usageParts(msg.usage));
+  parts.push(aiEffortName(msg.effort || state.settings.aiEffort).toLowerCase());
+  meta.textContent = parts.join(" · ");
+  meta.title = msg.usage
+    ? `Input ${Number(msg.usage.input || 0).toLocaleString()} · Output ${Number(msg.usage.output || 0).toLocaleString()}${msg.usage.reasoning ? ` · Reasoning ${Number(msg.usage.reasoning).toLocaleString()}` : ""}${msg.usage.cost != null ? ` · Cost ${formatCost(msg.usage.cost)}` : ""}`
+    : "";
+  if (msg.stopped) {
+    const tag = document.createElement("span");
+    tag.className = "ai-stopped";
+    tag.textContent = "Stopped";
+    meta.prepend(tag);
+  }
+}
+
+async function renderChatMarkdown(node, src, { streaming = false } = {}) {
+  const body = $(".chat-md", node);
+  if (!body) return;
+  const token = String(Number(body.dataset.renderToken || 0) + 1);
+  body.dataset.renderToken = token;
+  if (!src) {
+    body.innerHTML = streaming ? `<span class="ai-caret" aria-hidden="true"></span>` : "";
+    return;
+  }
+  try {
+    const html = await invoke("render_markdown", { src });
+    if (!node.isConnected || body.dataset.renderToken !== token) return;
+    body.innerHTML = html;
+    for (const child of body.querySelectorAll("[id]")) child.removeAttribute("id");
+    for (const link of body.querySelectorAll("a[href]")) {
+      if (/^(https?:|mailto:)/i.test(link.getAttribute("href"))) link.classList.add("external");
+      else link.removeAttribute("href");
+    }
+    decorateRich(body);
+    if (streaming) body.insertAdjacentHTML("beforeend", `<span class="ai-caret" aria-hidden="true"></span>`);
+  } catch {
+    if (body.dataset.renderToken === token) body.textContent = src;
+  }
+}
+
+function scheduleChatRender(node, msg) {
+  if (state.ai.renderTimer) return;
+  state.ai.renderTimer = setTimeout(() => {
+    state.ai.renderTimer = null;
+    renderChatMarkdown(node, msg.content || "", { streaming: true });
+  }, 120);
+}
+
+function renderAiMessage(msg, index) {
+  const node = document.createElement("article");
+  node.dataset.i = String(index);
+
+  if (msg.role === "user") {
+    node.className = "ai-msg ai-msg-user";
+    if (msg.reply?.text) {
+      const quote = document.createElement("div");
+      quote.className = "ai-sel-quote ai-reply-quote";
+      quote.title = msg.reply.text;
+      const label = document.createElement("b");
+      label.textContent = msg.reply.role === "assistant" ? "Replying to Mark" : "Replying to your message";
+      quote.append(label, document.createTextNode(`${msg.reply.text.slice(0, 600)}${msg.reply.text.length > 600 ? "…" : ""}`));
+      node.append(quote);
+    }
+    if (msg.selection?.text) {
+      const quote = document.createElement("div");
+      quote.className = "ai-sel-quote";
+      quote.title = msg.selection.text;
+      const label = document.createElement("b");
+      label.textContent = selectionDetail(msg.selection);
+      quote.append(label, document.createTextNode(`${msg.selection.text.slice(0, 600)}${msg.selection.text.length > 600 ? "…" : ""}`));
+      node.append(quote);
+    }
+    const bubble = document.createElement("div");
+    bubble.className = "ai-bubble";
+    bubble.textContent = msg.content;
+    node.append(bubble);
+    return node;
+  }
+
+  node.className = "ai-msg ai-msg-assistant";
+  node.innerHTML = `<header class="ai-msg-head">
+      <img class="ai-avatar-sm" src="assets/mark.png" alt="" width="20" height="20" />
+      <span class="ai-name">Mark</span>
+      <span class="ai-tag">${AI_MODEL_NAME}</span>
+      <span class="ai-tag ai-tag-effort"></span>
+      <time class="ai-time"></time>
+    </header>
+    <div class="ai-phase" role="status" hidden></div>
+    <details class="ai-think" hidden>
+      <summary><svg class="chev"><use href="#i-chevron"/></svg><svg class="ico"><use href="#i-sparkle"/></svg><span class="ai-think-label">Thinking…</span><span class="ai-think-time"></span></summary>
+      <div class="ai-reasoning"></div>
+    </details>
+    <details class="ai-trace" hidden>
+      <summary><svg class="chev"><use href="#i-chevron"/></svg><svg class="ico"><use href="#i-activity"/></svg><span>Actions</span><span class="ai-trace-count"></span></summary>
+      <ol class="ai-trace-list"></ol>
+    </details>
+    <div class="md chat-md"></div>
+    <footer class="ai-actions"><button class="ai-act" data-ai-copy>Copy</button><span class="ai-meta"></span></footer>`;
+
+  $(".ai-tag-effort", node).textContent = aiEffortName(msg.effort || state.settings.aiEffort);
+  const created = msg.createdAt ? new Date(msg.createdAt) : null;
+  $(".ai-time", node).textContent = created && !Number.isNaN(created.getTime()) ? created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
+  for (const action of msg.actions || []) if (action.status === "running") action.status = "done";
+  updateThinking(node, msg, false);
+  updateTrace(node, msg);
+  updateAiMeta(node, msg);
+  $("summary", $(".ai-think", node)).addEventListener("click", () => {
+    $(".ai-think", node).dataset.userToggled = "1";
+  });
+  return node;
+}
+
+function appendAiMessage(msg, index) {
+  $(".ai-empty", el.aiMessages)?.remove();
+  const node = renderAiMessage(msg, index);
+  el.aiMessages.append(node);
+  return node;
+}
+
+async function renderAiMessages() {
+  const chat = state.ai.chat;
+  el.aiMessages.innerHTML = "";
+  if (!chat || !chat.messages.length) {
+    renderAiEmpty();
+    updateAiChrome();
+    return;
+  }
+  for (let i = 0; i < chat.messages.length; i++) {
+    const message = chat.messages[i];
+    const node = renderAiMessage(message, i);
+    el.aiMessages.append(node);
+    if (message.role === "assistant" && message.content) await renderChatMarkdown(node, message.content);
+  }
+  updateAiChrome();
+  state.ai.pinned = true;
+  scrollAiIfPinned(true);
+}
+
+function scrollAiIfPinned(force = false) {
+  if (force || state.ai.pinned) el.aiMessages.scrollTop = el.aiMessages.scrollHeight;
+}
+
+function showAiError(message, { retry = true } = {}) {
+  const box = document.createElement("div");
+  box.className = "ai-error";
+  box.innerHTML = `<span class="ai-error-ico">${svg("alert")}</span><div class="ai-error-text"></div>
+    <div class="ai-error-acts"><button class="btn btn-ghost" data-ai-action="settings">Settings</button>${retry ? `<button class="btn btn-ghost" data-ai-action="retry">Retry</button>` : ""}</div>`;
+  $(".ai-error-text", box).textContent = message;
+  el.aiMessages.append(box);
+  scrollAiIfPinned(true);
+}
+
+function handleAiEvent(event) {
+  const current = state.ai.current;
+  if (!current) return;
+  const { msg, node } = current;
+
+  if (event.type === "status") {
+    setAiPhase(node, event.phase === "thinking" ? "Thinking…" : event.phase === "writing" ? "Writing…" : "Reading document…");
+    if (event.phase === "thinking") {
+      const details = $(".ai-think", node);
+      if (!details.hidden && !details.dataset.userToggled) details.open = true;
+    }
+    return;
+  }
+
+  if (event.type === "reasoning_delta") {
+    if (!current.reasoningStart) current.reasoningStart = performance.now();
+    msg.reasoning = `${msg.reasoning || ""}${event.text || ""}`.slice(0, AI_MAX_REASONING);
+    updateThinking(node, msg, true);
+    const details = $(".ai-think", node);
+    if (!details.dataset.userToggled) details.open = true;
+    setAiPhase(node, "Thinking…");
+    scrollAiIfPinned();
+    return;
+  }
+
+  if (event.type === "delta") {
+    if (!current.contentStarted) {
+      current.contentStarted = true;
+      if (current.reasoningStart) msg.reasoningDurationMs = Math.round(performance.now() - current.reasoningStart);
+      updateThinking(node, msg, false);
+      const details = $(".ai-think", node);
+      if (details.open && !details.dataset.userToggled) details.open = false;
+      setAiPhase(node, "Writing…");
+      node.classList.add("streaming");
+    }
+    msg.content = `${msg.content || ""}${event.text || ""}`;
+    scheduleChatRender(node, msg);
+    scrollAiIfPinned();
+    return;
+  }
+
+  if (event.type === "action") {
+    const id = event.id || event.name || "tool";
+    let action = (msg.actions || []).find((item) => item.id === id);
+    if (!action) {
+      action = { kind: "tool", id, label: event.name || "Tool", detail: "", status: "running" };
+      msg.actions.push(action);
+    }
+    action.label = event.name || action.label;
+    action.detail = event.detail || action.detail;
+    action.status = event.status || "running";
+    updateTrace(node, msg);
+    scrollAiIfPinned();
+    return;
+  }
+
+  if (event.type === "done") {
+    msg.timing = { firstTokenMs: event.first_token_ms || 0, durationMs: event.duration_ms || 0 };
+    msg.usage = { input: event.input_tokens || 0, output: event.output_tokens || 0, reasoning: event.reasoning_tokens || 0, cost: event.cost ?? null };
+    if (!current.contentStarted && current.reasoningStart) msg.reasoningDurationMs = Math.round(performance.now() - current.reasoningStart);
+  }
+}
+
+function setAiStreaming(streaming) {
+  el.aiSend.hidden = streaming;
+  el.aiStop.hidden = !streaming;
+  el.aiSend.disabled = streaming;
+}
+
+async function sendAiMessage(text) {
+  const value = String(text || "").trim();
+  if (!value) return;
+  if (state.ai.streaming) {
+    toast("Stop Mark first.", "error");
+    return;
+  }
+  if (!state.ai.open) openAiPanel({ focus: false });
+  const chat = ensureChat();
+  const selection = state.ai.selection;
+  const reply = state.ai.reply;
+  chat.file = currentFileMeta();
+  chat.effort = state.settings.aiEffort;
+  chat.messages.push({ role: "user", content: value, selection: selection || null, reply: reply || null, createdAt: new Date().toISOString() });
+  state.ai.selection = null;
+  state.ai.reply = null;
+  state.ai.pinned = true;
+  el.aiInput.value = "";
+  aiAutoGrow();
+  updateAiChrome();
+  for (const box of $$(".ai-error", el.aiMessages)) box.remove();
+  appendAiMessage(chat.messages[chat.messages.length - 1], chat.messages.length - 1);
+  scrollAiIfPinned(true);
+  await saveAiChat();
+  requestAssistant();
+}
+
+async function requestAssistant() {
+  const chat = state.ai.chat;
+  if (!chat || !chat.messages.length || state.ai.streaming) return;
+  const effort = (chat.effort = state.settings.aiEffort);
+  chat.file = currentFileMeta();
+  const assistant = {
+    role: "assistant",
+    content: "",
+    reasoning: "",
+    reasoningDurationMs: 0,
+    actions: seedActions(chat, effort),
+    usage: null,
+    timing: null,
+    stopped: false,
+    effort,
+    createdAt: new Date().toISOString(),
+  };
+  chat.messages.push(assistant);
+  const index = chat.messages.length - 1;
+  const node = appendAiMessage(assistant, index);
+  node.classList.add("streaming");
+  const think = $(".ai-think", node);
+  if (think) delete think.dataset.userToggled;
+  state.ai.current = { msg: assistant, node, index, reasoningStart: 0, contentStarted: false };
+  state.ai.streaming = true;
+  state.ai.requestId = (crypto.randomUUID && crypto.randomUUID()) || `${nanoid8()}${nanoid8()}`;
+  setAiPhase(node, "Reading document…");
+  setAiStreaming(true);
+  scrollAiIfPinned(true);
+
+  const channel = new Channel();
+  channel.onmessage = handleAiEvent;
+  try {
+    const reply = await invoke("ai_chat", {
+      requestId: state.ai.requestId,
+      model: AI_MODEL,
+      effort,
+      messages: buildApiMessages(chat),
+      onEvent: channel,
+    });
+    await finalizeAssistant(reply);
+  } catch (err) {
+    failAssistant(String(err));
+  } finally {
+    state.ai.streaming = false;
+    state.ai.requestId = null;
+    setAiStreaming(false);
+    state.ai.current?.node.classList.remove("streaming");
+  }
+}
+
+async function finalizeAssistant(reply) {
+  const current = state.ai.current;
+  if (!current) return;
+  const { msg, node } = current;
+  if (reply?.content) msg.content = reply.content;
+  if (reply?.reasoning) msg.reasoning = reply.reasoning;
+  if (reply?.usage) msg.usage = reply.usage;
+  if (reply?.timing) msg.timing = reply.timing;
+  msg.stopped = Boolean(reply?.stopped);
+  if (reply?.actions?.length) {
+    for (const action of reply.actions) {
+      const existing = (msg.actions || []).find((item) => item.id === action.id);
+      if (existing) Object.assign(existing, action);
+      else msg.actions.push({ kind: "tool", ...action });
+    }
+  }
+  for (const action of msg.actions || []) if (action.status === "running") action.status = "done";
+  if (!current.contentStarted && current.reasoningStart && !msg.reasoningDurationMs) {
+    msg.reasoningDurationMs = Math.round(performance.now() - current.reasoningStart);
+  }
+  if (state.ai.renderTimer) {
+    clearTimeout(state.ai.renderTimer);
+    state.ai.renderTimer = null;
+  }
+  setAiPhase(node, "");
+  node.classList.remove("streaming");
+  updateThinking(node, msg, false);
+  updateTrace(node, msg);
+  await renderChatMarkdown(node, msg.content || "");
+  updateAiMeta(node, msg);
+  state.ai.current = null;
+  scrollAiIfPinned();
+  if (state.ai.chat) recalcChatUsage(state.ai.chat);
+  updateAiChrome();
+  await saveAiChat();
+  maybeGenerateTitle();
+}
+
+function failAssistant(message) {
+  const current = state.ai.current;
+  const chat = state.ai.chat;
+  if (current) {
+    if (chat?.messages[chat.messages.length - 1] === current.msg) chat.messages.pop();
+    current.node.remove();
+    state.ai.current = null;
+  }
+  if (state.ai.renderTimer) {
+    clearTimeout(state.ai.renderTimer);
+    state.ai.renderTimer = null;
+  }
+  showAiError(message, { retry: true });
+  saveAiChat();
+  updateAiChrome();
+}
+
+async function stopAi() {
+  if (!state.ai.streaming || !state.ai.requestId) return;
+  try {
+    await invoke("ai_cancel", { requestId: state.ai.requestId });
+  } catch { /* the stream will finish on its own */ }
+}
+
+function aiAutoGrow() {
+  el.aiInput.style.height = "auto";
+  el.aiInput.style.height = `${Math.min(el.aiInput.scrollHeight, 160)}px`;
+}
+
+function cleanTitle(value) {
+  return String(value || "")
+    .split("\n")[0]
+    .replace(/^[\s"'`*#>-]+/, "")
+    .replace(/[\s"'`*#]+$/, "")
+    .trim()
+    .slice(0, 60);
+}
+
+const fallbackTitle = (text) => cleanTitle(String(text || "").replace(/\s+/g, " ")) || "New chat";
+
+async function maybeGenerateTitle() {
+  const chat = state.ai.chat;
+  if (!chat || chat.titleEdited || chat.titleGenerated || state.ai.titleBusy) return;
+  const firstUser = chat.messages.find((message) => message.role === "user");
+  const firstAssistant = chat.messages.find((message) => message.role === "assistant" && message.content);
+  if (!firstUser || !firstAssistant) return;
+  const fallback = fallbackTitle(firstUser.content);
+  const isDefault = !chat.title || chat.title === "New chat" || chat.title === fallback;
+  if (!isDefault) return;
+  state.ai.titleBusy = true;
+  try {
+    const title = await invoke("ai_title", {
+      model: AI_MODEL,
+      messages: [
+        { role: "system", content: "You name chat conversations. Reply with a short title of 2 to 5 words. No quotes, no markdown, no punctuation at the end." },
+        { role: "user", content: `Document: ${chat.file?.name || "none"}\nQuestion: ${firstUser.content.slice(0, 2000)}\nAnswer: ${firstAssistant.content.slice(0, 2000)}\n\nTitle:` },
+      ],
+    });
+    if (state.ai.chat !== chat) return;
+    chat.title = cleanTitle(title) || fallback;
+    chat.titleGenerated = true;
+  } catch {
+    if (state.ai.chat !== chat) return;
+    chat.title = fallback;
+  } finally {
+    state.ai.titleBusy = false;
+  }
+  chat.updatedAt = new Date().toISOString();
+  updateAiChrome();
+  await saveAiChat();
+  loadAiChats();
+}
+
+function startAiRename() {
+  const chat = state.ai.chat;
+  if (!chat) return;
+  el.aiTitle.hidden = true;
+  el.aiTitleInput.hidden = false;
+  el.aiTitleInput.value = chat.title === "New chat" ? "" : chat.title;
+  el.aiTitleInput.focus();
+  el.aiTitleInput.select();
+}
+
+async function finishAiRename(save) {
+  if (el.aiTitleInput.hidden) return;
+  const chat = state.ai.chat;
+  const value = cleanTitle(el.aiTitleInput.value);
+  el.aiTitleInput.hidden = true;
+  el.aiTitle.hidden = false;
+  if (chat && save && value && value !== chat.title) {
+    chat.title = value;
+    chat.titleEdited = true;
+    updateAiChrome();
+    await saveAiChat();
+    loadAiChats();
+  } else {
+    updateAiChrome();
+  }
+  el.aiTitle.focus();
+}
+
+async function loadAiChats() {
+  try {
+    state.ai.list = await invoke("chats_list");
+  } catch {
+    state.ai.list = [];
+  }
+  renderAiHistory();
+}
+
+function renderAiHistory() {
+  const list = state.ai.list;
+  if (!list.length) {
+    el.aiHistoryList.innerHTML = `<div class="ai-hist-empty">No saved chats yet.<br>Your conversations will appear here.</div>`;
+    return;
+  }
+  const groups = new Map();
+  for (const chat of list) {
+    if (!groups.has(chat.date)) groups.set(chat.date, []);
+    groups.get(chat.date).push(chat);
+  }
+  el.aiHistoryList.innerHTML = [...groups.entries()].map(([date, chats]) =>
+    `<div class="ai-hist-group">${escapeHtml(dateLabel(date))}</div>` + chats.map((chat) => {
+      const usage = [];
+      if (chat.tokens) usage.push(`${fmtCount(chat.tokens)} tokens`);
+      if (chat.cost != null) usage.push(formatCost(chat.cost));
+      const usageLabel = usage.length ? ` · ${usage.join(" · ")}` : "";
+      return `
+      <div class="ai-hist-row" role="listitem" tabindex="0" data-chat-id="${escapeHtml(chat.id)}" data-chat-date="${escapeHtml(chat.date)}" ${state.ai.chat?.id === chat.id ? 'aria-current="true"' : ""} title="${escapeHtml(chat.title)}">
+        <span class="ai-hist-text"><span class="ai-hist-title">${escapeHtml(chat.title || "New chat")}</span><span class="ai-hist-sub">${escapeHtml(chat.fileName || "No file")} · ${chat.messageCount} ${chat.messageCount === 1 ? "message" : "messages"}${escapeHtml(usageLabel)}</span></span>
+        <span class="ai-hist-acts">
+          <button class="icon-btn sm" data-ai-rename-chat="${escapeHtml(chat.id)}" data-chat-date="${escapeHtml(chat.date)}" data-tip="Rename" aria-label="Rename chat">${svg("pencil")}</button>
+          <button class="icon-btn sm" data-ai-delete-chat="${escapeHtml(chat.id)}" data-chat-date="${escapeHtml(chat.date)}" data-tip="Delete" aria-label="Delete chat">${svg("trash")}</button>
+        </span>
+      </div>`;
+    }).join("")).join("");
+}
+
+async function openAiChat(id, date) {
+  if (state.ai.streaming) {
+    toast("Stop Mark first.", "error");
+    return false;
+  }
+  try {
+    const raw = await invoke("chat_load", { date, id });
+    state.ai.chat = JSON.parse(raw);
+    recalcChatUsage(state.ai.chat);
+    state.ai.selection = null;
+    state.ai.reply = null;
+    state.ai.current = null;
+    el.aiHistory.hidden = true;
+    if (!state.ai.open) openAiPanel({ focus: false });
+    updateAiChrome();
+    await renderAiMessages();
+    renderAiHistory();
+    el.aiInput.focus();
+    maybeGenerateTitle();
+    return true;
+  } catch (err) {
+    toast(`Couldn't open that chat. ${err}`, "error");
+    return false;
+  }
+}
+
+function askDeleteAiChat(id, date) {
+  const chat = state.ai.list.find((item) => item.id === id && item.date === date);
+  state.ai.deleteTarget = { id, date };
+  el.aiDelName.textContent = chat?.title || "this chat";
+  el.aiDelDlg.returnValue = "cancel";
+  el.aiDelDlg.showModal();
+  $('[value="delete"]', el.aiDelDlg).focus();
+}
+
+for (const button of $$("button[value]", el.aiDelDlg)) button.onclick = () => el.aiDelDlg.close(button.value);
+el.aiDelDlg.addEventListener("close", async () => {
+  if (el.aiDelDlg.returnValue !== "delete" || !state.ai.deleteTarget) return;
+  const { id, date } = state.ai.deleteTarget;
+  state.ai.deleteTarget = null;
+  try {
+    await invoke("chat_delete", { date, id });
+  } catch (err) {
+    toast(`Couldn't delete that chat. ${err}`, "error");
+    return;
+  }
+  if (state.ai.chat?.id === id) {
+    state.ai.chat = null;
+    state.ai.selection = null;
+    state.ai.reply = null;
+    updateAiChrome();
+    renderAiEmpty();
+  }
+  await loadAiChats();
+  toast("Chat deleted.");
+});
+
+function newAiChat() {
+  if (state.ai.streaming) {
+    toast("Stop Mark first.", "error");
+    return;
+  }
+  hideSelChip();
+  if (state.ai.chat && !state.ai.chat.messages.length) {
+    el.aiInput.focus();
+    return;
+  }
+  state.ai.chat = null;
+  state.ai.selection = null;
+  state.ai.reply = null;
+  state.ai.current = null;
+  el.aiHistory.hidden = true;
+  el.aiInput.value = "";
+  aiAutoGrow();
+  updateAiChrome();
+  renderAiEmpty();
+  el.aiInput.focus();
+}
+
+function openAiHistory() {
+  if (!state.ai.open) openAiPanel({ focus: false });
+  hideSelChip();
+  el.aiHistory.hidden = false;
+  loadAiChats();
+  el.aiHistoryList.querySelector(".ai-hist-row")?.focus();
+}
+
+function closeAiHistory() {
+  el.aiHistory.hidden = true;
+  el.aiInput.focus();
+}
+
+function openAiPanel({ focus = true } = {}) {
+  if (narrow.matches) el.win.dataset.sidebar = "";
+  state.ai.open = true;
+  el.aiPanel.hidden = false;
+  el.aiSplitter.hidden = false;
+  store.set("aiOpen", true);
+  updateAiToggle();
+  if (!state.ai.chat) renderAiEmpty();
+  updateAiChrome();
+  if (focus) el.aiInput.focus();
+}
+
+function closeAiPanel() {
+  state.ai.open = false;
+  hideSelChip();
+  el.aiPanel.hidden = true;
+  el.aiSplitter.hidden = true;
+  store.set("aiOpen", false);
+  updateAiToggle();
+}
+
+function toggleAiPanel() {
+  if (state.ai.open) closeAiPanel();
+  else openAiPanel();
+}
+
+function updateAiToggle() {
+  for (const button of $$('[data-action="toggle-ai"]')) button.setAttribute("aria-pressed", String(state.ai.open));
+  el.win.dataset.ai = state.ai.open ? "open" : "closed";
+}
+
+function setAiEffort(value) {
+  if (!AI_EFFORTS.some(([effort]) => effort === value)) return;
+  state.settings.aiEffort = value;
+  const chat = state.ai.chat;
+  if (chat) {
+    chat.effort = value;
+    chat.updatedAt = new Date().toISOString();
+    saveAiChat();
+  }
+  applySettings();
+  updateAiChrome();
+}
+
+function openAiEffortMenu(anchor) {
+  const current = state.settings.aiEffort;
+  const hints = { off: "Fastest", low: "Balanced", high: "Deeper", max: "Deepest" };
+  el.aiMenu.innerHTML = `<div class="ai-menu-model"><b>${AI_MODEL_NAME}</b><span>${AI_MODEL}</span></div>
+    <div class="ai-menu-label">Reasoning effort</div>` + AI_EFFORTS.map(([value, label]) =>
+      `<button role="menuitemradio" data-effort="${value}" aria-checked="${value === current}">${svg("check")}<span>${label}</span><span class="ai-menu-desc">${hints[value]}</span></button>`).join("");
+  el.aiMenu.hidden = false;
+  anchor.setAttribute("aria-expanded", "true");
+  const rect = anchor.getBoundingClientRect();
+  const menuRect = el.aiMenu.getBoundingClientRect();
+  const left = Math.min(innerWidth - menuRect.width - 8, Math.max(8, rect.right - menuRect.width));
+  const top = rect.bottom + 6 + menuRect.height < innerHeight ? rect.bottom + 6 : Math.max(8, rect.top - menuRect.height - 6);
+  Object.assign(el.aiMenu.style, { left: `${left}px`, top: `${top}px` });
+  el.aiMenu.querySelector('[aria-checked="true"]')?.focus();
+}
+
+function closeAiEffortMenu() {
+  el.aiMenu.hidden = true;
+  $('[data-action="ai-effort-menu"]')?.setAttribute("aria-expanded", "false");
+}
+
+async function refreshAiStatus() {
+  try {
+    const status = await invoke("ai_status");
+    state.ai.hasKey = status.hasKey;
+    el.aiKeyStatus.classList.toggle("ok", Boolean(status.hasKey));
+    el.aiKeyStatus.classList.toggle("warn", !status.hasKey);
+    el.aiKeyStatus.textContent = status.hasKey
+      ? status.source === "config" ? "Saved in this app." : status.source === "environment" ? "Loaded from the environment." : "Loaded from .env."
+      : "No key yet — add one to start chatting.";
+  } catch {
+    el.aiKeyStatus.textContent = "Couldn't check the key.";
+  }
+}
+
+async function saveAiKey() {
+  const key = el.aiKeyInput.value.trim();
+  if (!key) {
+    el.aiKeyInput.focus();
+    return;
+  }
+  try {
+    await invoke("ai_set_key", { key });
+    el.aiKeyInput.value = "";
+    toast("API key saved.");
+    refreshAiStatus();
+  } catch (err) {
+    toast(`Couldn't save the key. ${err}`, "error");
+  }
+}
+
+async function clearAiKey() {
+  try {
+    await invoke("ai_set_key", { key: null });
+    toast("Saved API key removed.");
+    refreshAiStatus();
+  } catch (err) {
+    toast(`Couldn't remove the key. ${err}`, "error");
+  }
+}
+
+function hideSelChip() {
+  el.aiSelChip.hidden = true;
+  state.ai.chip = null;
+}
+
+function showSelChip(info, anchorRect, point) {
+  state.ai.chip = info;
+  const label = info.kind === "reply" ? (info.role === "assistant" ? "Reply Mark" : "Reply") : "Ask Mark";
+  $(".ai-selchip-label", el.aiSelChip).textContent = label;
+  el.aiSelChip.setAttribute("aria-label", label);
+  el.aiSelChip.hidden = false;
+  const chip = el.aiSelChip.getBoundingClientRect();
+  const centerX = point?.x ?? anchorRect.left + anchorRect.width / 2;
+  const bottom = point?.y ?? anchorRect.bottom;
+  const top = bottom + chip.height + 8 < innerHeight ? bottom + 8 : Math.max(8, (anchorRect?.top ?? bottom) - chip.height - 8);
+  const left = Math.max(8, Math.min(innerWidth - chip.width - 8, centerX - chip.width / 2));
+  el.aiSelChip.style.left = `${left}px`;
+  el.aiSelChip.style.top = `${top}px`;
+}
+
+function headingTrail(node) {
+  let found = null;
+  for (const heading of $$("h1,h2,h3,h4,h5,h6", el.preview)) {
+    if (heading === node || heading.contains(node)) {
+      found = heading;
+      break;
+    }
+    if (heading.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING) found = heading;
+    else break;
+  }
+  return found?.textContent.trim() || null;
+}
+
+function checkPreviewSelection() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return hideSelChip();
+  const text = selection.toString().trim();
+  if (!text || text.length > 4000) return hideSelChip();
+  const range = selection.getRangeAt(0);
+  const ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentElement;
+  if (!ancestor || !el.preview.contains(ancestor)) return hideSelChip();
+  const rect = range.getBoundingClientRect();
+  if (!rect.width && !rect.height) return hideSelChip();
+  showSelChip({ text, heading: headingTrail(ancestor), source: "preview", kind: "ask" }, rect);
+}
+
+function askMarkFromChip() {
+  const info = state.ai.chip;
+  if (!info || info.kind === "reply") return;
+  hideSelChip();
+  openAiPanel({ focus: false });
+  state.ai.selection = info;
+  updateAiChrome();
+  const prompt = "Explain this selection in the context of the document.";
+  if (!el.aiInput.value.trim()) {
+    el.aiInput.value = prompt;
+    aiAutoGrow();
+    el.aiInput.select();
+  }
+  el.aiInput.focus();
+}
+
+function replyMarkFromChip() {
+  const info = state.ai.chip;
+  if (!info || info.kind !== "reply") return;
+  hideSelChip();
+  state.ai.reply = {
+    text: info.text,
+    role: info.role,
+    messageIndex: info.messageIndex,
+    snippet: info.text.slice(0, 120),
+  };
+  updateAiChrome();
+  const prompt = "Can you explain this part further?";
+  if (!el.aiInput.value.trim()) {
+    el.aiInput.value = prompt;
+    aiAutoGrow();
+    el.aiInput.select();
+  }
+  el.aiInput.focus();
+}
+
+function checkChatSelection() {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return;
+  const text = selection.toString().trim();
+  if (!text || text.length > 4000) return;
+  const range = selection.getRangeAt(0);
+  const ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+    ? range.commonAncestorContainer
+    : range.commonAncestorContainer.parentElement;
+  if (!ancestor || !el.aiMessages.contains(ancestor)) return;
+  const messageNode = ancestor.closest(".ai-msg");
+  if (!messageNode) return;
+  const messageIndex = Number(messageNode.dataset.i);
+  const message = state.ai.chat?.messages[messageIndex];
+  if (!message) return;
+  const rect = range.getBoundingClientRect();
+  if (!rect.width && !rect.height) return;
+  showSelChip({ kind: "reply", text, role: message.role, messageIndex, snippet: text.slice(0, 120) }, rect);
+}
+
+el.aiTitleInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) {
+    e.preventDefault();
+    finishAiRename(true);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    finishAiRename(false);
+  }
+});
+el.aiTitleInput.addEventListener("blur", () => { if (!el.aiTitleInput.hidden) finishAiRename(true); });
+
+el.aiComposer.addEventListener("submit", (e) => {
+  e.preventDefault();
+  sendAiMessage(el.aiInput.value);
+});
+el.aiInput.addEventListener("input", aiAutoGrow);
+el.aiInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+    e.preventDefault();
+    sendAiMessage(el.aiInput.value);
+  } else if (e.key === "Escape" && state.ai.streaming) {
+    e.preventDefault();
+    e.stopPropagation();
+    stopAi();
+  }
+});
+
+el.aiMessages.addEventListener("click", (e) => {
+  const link = e.target.closest(".chat-md a[href]");
+  if (link) {
+    e.preventDefault();
+    const href = link.getAttribute("href");
+    if (/^(https?:|mailto:)/i.test(href)) opener.openUrl(href).catch(() => toast("Couldn't open that link.", "error"));
+    return;
+  }
+  const suggestion = e.target.closest("[data-ai-prompt]");
+  if (suggestion) {
+    sendAiMessage(suggestion.dataset.aiPrompt);
+    return;
+  }
+  const action = e.target.closest("[data-ai-action]");
+  if (action?.dataset.aiAction === "retry") {
+    action.closest(".ai-error")?.remove();
+    requestAssistant();
+  } else if (action?.dataset.aiAction === "settings") {
+    closeAiPanel();
+    openSettings();
+  }
+  const copy = e.target.closest("[data-ai-copy]");
+  if (copy) {
+    const index = Number(copy.closest(".ai-msg")?.dataset.i);
+    const message = state.ai.chat?.messages[index];
+    if (message?.content) {
+      navigator.clipboard.writeText(message.content).then(() => {
+        copy.textContent = "Copied";
+        setTimeout(() => { copy.textContent = "Copy"; }, 1200);
+      });
+    }
+  }
+});
+el.aiMessages.addEventListener("scroll", () => {
+  state.ai.pinned = el.aiMessages.scrollHeight - el.aiMessages.scrollTop - el.aiMessages.clientHeight < 90;
+});
+
+el.aiHistoryList.addEventListener("click", (e) => {
+  const rename = e.target.closest("[data-ai-rename-chat]");
+  if (rename) {
+    if (state.ai.streaming) {
+      toast("Stop Mark first.", "error");
+      return;
+    }
+    openAiChat(rename.dataset.aiRenameChat, rename.dataset.chatDate).then((ok) => { if (ok) startAiRename(); });
+    return;
+  }
+  const remove = e.target.closest("[data-ai-delete-chat]");
+  if (remove) {
+    askDeleteAiChat(remove.dataset.aiDeleteChat, remove.dataset.chatDate);
+    return;
+  }
+  const row = e.target.closest("[data-chat-id]");
+  if (row) openAiChat(row.dataset.chatId, row.dataset.chatDate);
+});
+el.aiHistoryList.addEventListener("keydown", (e) => {
+  const row = e.target.closest("[data-chat-id]");
+  if (row && !e.target.closest("button") && (e.key === "Enter" || e.key === " ")) {
+    e.preventDefault();
+    openAiChat(row.dataset.chatId, row.dataset.chatDate);
+  }
+});
+
+el.aiMenu.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-effort]");
+  if (!button) return;
+  setAiEffort(button.dataset.effort);
+  closeAiEffortMenu();
+});
+document.addEventListener("mousedown", (e) => {
+  if (el.aiMenu.hidden) return;
+  if (!e.target.closest(".ai-menu") && !e.target.closest('[data-action="ai-effort-menu"]')) closeAiEffortMenu();
+});
+
+el.aiKeyInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.isComposing) {
+    e.preventDefault();
+    saveAiKey();
+  }
+});
+
+el.aiSelChip.addEventListener("click", () => {
+  if (state.ai.chip?.kind === "reply") replyMarkFromChip();
+  else askMarkFromChip();
+});
+el.previewPane.addEventListener("pointerup", () => setTimeout(checkPreviewSelection, 0));
+el.previewPane.addEventListener("keyup", () => setTimeout(checkPreviewSelection, 0));
+el.editor.addEventListener("pointerup", (e) => {
+  setTimeout(() => {
+    const start = el.editor.selectionStart;
+    const end = el.editor.selectionEnd;
+    if (start === end) return hideSelChip();
+    const text = el.editor.value.slice(start, end).trim();
+    if (!text || text.length > 4000) return hideSelChip();
+    const lineOf = (position) => el.editor.value.slice(0, position).split("\n").length;
+    showSelChip({ text, lines: [lineOf(start), lineOf(end)], source: "editor", kind: "ask" }, null, { x: e.clientX, y: e.clientY });
+  }, 0);
+});
+el.previewPane.addEventListener("scroll", hideSelChip);
+el.editor.addEventListener("scroll", hideSelChip);
+el.aiMessages.addEventListener("pointerup", () => setTimeout(checkChatSelection, 0));
+el.aiMessages.addEventListener("keyup", () => setTimeout(checkChatSelection, 0));
+el.aiMessages.addEventListener("scroll", hideSelChip);
+addEventListener("resize", hideSelChip);
+document.addEventListener("pointerdown", (e) => { if (!e.target.closest(".ai-selchip")) hideSelChip(); }, true);
+document.addEventListener("selectionchange", debounce(() => {
+  if (!el.aiSelChip.hidden) {
+    const selection = document.getSelection();
+    if (!selection || selection.isCollapsed) hideSelChip();
+  }
+}, 200));
+
+el.aiSplitter.addEventListener("pointerdown", (e) => {
+  el.aiSplitter.setPointerCapture(e.pointerId);
+  el.aiSplitter.classList.add("dragging");
+  const right = el.aiPanel.getBoundingClientRect().right;
+  const move = (event) => {
+    const width = Math.round(Math.min(560, Math.max(300, right - event.clientX)));
+    el.root.style.setProperty("--ai-w", `${width}px`);
+  };
+  const up = () => {
+    el.aiSplitter.classList.remove("dragging");
+    el.aiSplitter.removeEventListener("pointermove", move);
+    store.set("aiW", getComputedStyle(el.root).getPropertyValue("--ai-w").trim());
+  };
+  el.aiSplitter.addEventListener("pointermove", move);
+  el.aiSplitter.addEventListener("pointerup", up, { once: true });
+});
+el.aiSplitter.addEventListener("dblclick", () => {
+  el.root.style.removeProperty("--ai-w");
+  store.set("aiW", null);
 });
 
 // ---------- window integration ----------
@@ -1505,6 +2777,9 @@ webview.onDragDropEvent((e) => {
   const initialReq = fresh ? Promise.resolve(null) : invoke("initial_file"); // start the document fetch before anything else
   renderSidebar();
   syncMaximized();
+  const aiW = store.get("aiW", null);
+  if (aiW) el.root.style.setProperty("--ai-w", aiW);
+  if (store.get("aiOpen", false)) openAiPanel({ focus: false });
   if (state.folder) loadTree().catch(() => setFolder(null));
   // Path shortening (~) is cosmetic: apply it when it arrives instead of waiting on it.
   tpath.homeDir().then((home) => {

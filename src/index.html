@@ -40,6 +40,14 @@
       <symbol id="i-window" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="14" rx="3"/><path d="M3.5 9h17"/><path d="M12 12v4M10 14h4"/></symbol>
       <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 6.5A2.5 2.5 0 0 1 7.5 4h8L20 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-10A2.5 2.5 0 0 1 5 17.5z"/><path d="M8.5 4v4.5h7"/><rect x="8.5" y="13" width="7" height="5"/></symbol>
       <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11.2v5M12 7.8v.4"/></symbol>
+      <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 4.5 13.7 9.3 18.5 11l-4.8 1.7L12 17.5l-1.7-4.8L5.5 11l4.8-1.7z"/><path d="M18.5 3.5v3M17 5h3"/></symbol>
+      <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></symbol>
+      <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 7 4 12l5 5"/><path d="M4 12h9a7 7 0 0 1 7 7v1"/></symbol>
+      <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5"/></symbol>
+      <symbol id="i-activity" viewBox="0 0 24 24"><path d="M4 12h3.5l2.5-6 3.5 12 2.5-6H20"/></symbol>
+      <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
+      <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/><path d="M10.5 11v5M13.5 11v5"/></symbol>
+      <symbol id="i-loader" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/></symbol>
     </defs>
   </svg>
 
@@ -63,6 +71,7 @@
         <button class="icon-btn" data-action="pdf" data-tip="Export as PDF" data-key="Ctrl P" aria-label="Export as PDF"><svg><use href="#i-pdf"/></svg></button>
       </div>
       <div class="tb-group">
+        <button class="icon-btn" data-action="toggle-ai" data-tip="Mark (AI)" data-key="Ctrl Shift M" aria-label="Toggle Mark AI" aria-pressed="false"><svg><use href="#i-sparkle"/></svg></button>
         <button class="icon-btn" data-action="settings" data-tip="Settings" data-key="Ctrl ," aria-label="Settings"><svg><use href="#i-settings"/></svg></button>
         <span class="tb-sep"></span>
         <button class="win-btn" data-action="minimize" aria-label="Minimize"><svg><use href="#i-min"/></svg></button>
@@ -162,6 +171,60 @@
           <span class="st-save"></span>
         </footer>
       </main>
+
+      <div class="ai-splitter" role="separator" aria-orientation="vertical" aria-label="Resize Mark panel" hidden></div>
+      <aside class="ai-panel" aria-label="Mark, AI assistant" hidden>
+        <header class="ai-head">
+          <img class="ai-avatar" src="assets/mark.png" alt="" width="26" height="26" />
+          <div class="ai-head-text">
+            <button class="ai-title" data-action="ai-rename" data-tip="Rename chat" aria-label="Rename chat">New chat</button>
+            <input class="ai-title-input" placeholder="Chat name" maxlength="120" aria-label="Chat name" hidden />
+            <button class="ai-sub" data-action="ai-effort-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Model and reasoning effort">
+              <span class="ai-model-name">DeepSeek V4.1 Flash</span>
+              <span class="ai-effort-label">High</span>
+              <svg><use href="#i-down"/></svg>
+            </button>
+          </div>
+          <button class="icon-btn sm" data-action="ai-history" data-tip="Chat history" aria-label="Chat history"><svg><use href="#i-clock"/></svg></button>
+          <button class="icon-btn sm" data-action="ai-new" data-tip="New chat" aria-label="New chat"><svg><use href="#i-plus"/></svg></button>
+          <button class="icon-btn sm" data-action="toggle-ai" data-tip="Close Mark" aria-label="Close Mark"><svg><use href="#i-x"/></svg></button>
+        </header>
+        <div class="ai-body">
+          <div class="ai-messages" role="log" aria-live="polite">
+            <div class="ai-empty">
+              <img src="assets/mark.png" alt="" width="56" height="56" />
+              <h2>Ask Mark</h2>
+              <p>Mark reads the document you have open and answers in Markdown.</p>
+              <div class="ai-suggestions">
+                <button class="ai-suggest" data-ai-prompt="What can you help me with?"><svg><use href="#i-sparkle"/></svg>What can you help me with?</button>
+                <button class="ai-suggest" data-ai-prompt="How do you use the document I have open?"><svg><use href="#i-sparkle"/></svg>How do you use my document?</button>
+                <button class="ai-suggest" data-ai-prompt="Give me a quick Markdown writing tip."><svg><use href="#i-sparkle"/></svg>Give me a Markdown writing tip</button>
+              </div>
+            </div>
+          </div>
+          <div class="ai-history" hidden>
+            <div class="ai-history-head">
+              <h2>Chats</h2>
+              <button class="icon-btn sm" data-action="ai-history-close" data-tip="Back to chat" aria-label="Back to chat"><svg><use href="#i-x"/></svg></button>
+            </div>
+            <div class="ai-history-list" role="list"></div>
+          </div>
+        </div>
+        <form class="ai-composer">
+          <div class="ai-context" hidden>
+            <span class="ai-chip ai-chip-file" data-tip=""><svg><use href="#i-file"/></svg><span class="ai-chip-text"></span></span>
+            <span class="ai-chip ai-chip-sel" hidden><svg><use href="#i-sparkle"/></svg><span class="ai-chip-text"></span><button type="button" class="ai-chip-x" data-action="ai-clear-selection" aria-label="Remove selection"><svg><use href="#i-x"/></svg></button></span>
+            <span class="ai-chip ai-chip-reply" hidden><svg><use href="#i-reply"/></svg><span class="ai-chip-text"></span><button type="button" class="ai-chip-x" data-action="ai-clear-reply" aria-label="Remove reply"><svg><use href="#i-x"/></svg></button></span>
+          </div>
+          <div class="ai-chat-total" hidden></div>
+          <div class="ai-input-row">
+            <textarea class="ai-input" rows="1" placeholder="Ask Mark about this file…" aria-label="Message Mark"></textarea>
+            <button class="btn btn-primary ai-send" type="submit" aria-label="Send" data-tip="Send"><svg><use href="#i-send"/></svg></button>
+            <button class="btn ai-stop" type="button" data-action="ai-stop" aria-label="Stop" data-tip="Stop" hidden><svg><use href="#i-stop"/></svg></button>
+          </div>
+          <p class="ai-foot">Mark sees the open file · <kbd>Enter</kbd> send · <kbd>Shift</kbd><kbd>Enter</kbd> new line</p>
+        </form>
+      </aside>
     </div>
 
     <div class="drop-overlay" hidden>
@@ -172,10 +235,12 @@
   <div class="toasts" role="status"></div>
   <div class="tooltip" role="tooltip" hidden></div>
   <div class="ctx-menu popover" role="menu" hidden></div>
+  <button class="ai-selchip popover" hidden><img src="assets/mark.png" alt="" width="20" height="20" /><span class="ai-selchip-label">Ask Mark</span></button>
+  <div class="ai-menu popover" role="menu" hidden></div>
 
   <dialog class="dialog dlg-settings" aria-labelledby="settings-title">
     <div class="dialog-head">
-      <h2 id="settings-title">Appearance</h2>
+      <h2 id="settings-title">Settings</h2>
       <button class="icon-btn" data-action="dialog-close" aria-label="Close"><svg><use href="#i-x"/></svg></button>
     </div>
     <div class="card">
@@ -214,6 +279,28 @@
         <label class="search-field font-field"><input class="font-input" data-font="fontEditor" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Editor font" /></label>
       </div>
     </div>
+    <div class="card ai-card">
+      <div class="card-heading">Mark</div>
+      <div class="row">
+        <div><div class="row-label">Command Code API key</div><div class="row-desc ai-key-status">Checking…</div></div>
+        <div class="ai-key-box">
+          <label class="search-field ai-key-field"><input class="ai-key-input" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" aria-label="Command Code API key" /></label>
+          <button class="btn" data-action="ai-save-key">Save</button>
+          <button class="btn btn-ghost" data-action="ai-clear-key">Clear</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Default reasoning effort</div><div class="row-desc">Used for new chats; change it per chat in Mark's header.</div></div>
+        <div class="segmented" data-setting="aiEffort">
+          <button data-value="off">Off</button><button data-value="low">Low</button><button data-value="high">High</button><button data-value="max">Max</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Model</div><div class="row-desc">DeepSeek V4.1 Flash via the Command Code gateway.</div></div>
+        <span class="ai-model-id">deepseek/deepseek-v4.1-flash</span>
+      </div>
+      <p class="ai-privacy">Mark sends the open document to Command Code when you ask. Reasoning and chats stay on this device.</p>
+    </div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
          ids (for aria) are prefixed so rendered heading ids can't collide. -->
     <div class="font-menu popover" id="app-font-menu" role="listbox" aria-label="Fonts" hidden></div>
@@ -229,6 +316,18 @@
       <span class="st-spacer"></span>
       <button class="btn btn-outline" value="cancel">Cancel</button>
       <button class="btn btn-primary" value="save">Save</button>
+    </div>
+  </dialog>
+
+  <dialog class="dialog dlg-ai-delete" aria-labelledby="ai-delete-title">
+    <div class="dialog-head">
+      <h2 id="ai-delete-title">Delete chat?</h2>
+    </div>
+    <p class="dialog-text">“<span class="ai-del-name"></span>” will be permanently deleted. This can't be undone.</p>
+    <div class="dialog-foot">
+      <span class="st-spacer"></span>
+      <button class="btn btn-outline" value="cancel">Cancel</button>
+      <button class="btn btn-danger" value="delete">Delete</button>
     </div>
   </dialog>
 

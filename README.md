@@ -31,6 +31,27 @@ built with Tauri.
 - Configurable interface, document, and editor fonts (picks up the fonts installed on your system)
 - Export the current document to PDF
 
+**Mark (AI)**
+- Right-side assistant that always sees the open document, including unsaved edits
+- Select any text to reveal **Ask Mark**; the selection is attached alongside the full file
+- Streaming Markdown answers with an expandable **Thinking** disclosure and an **Actions** trace
+- Per-message token usage, plus chat totals and cost when the gateway reports it
+- Chats are saved under `~/.markdown-viewer-app/chats`, named by the model, and can be renamed or deleted
+
+## Mark (AI)
+
+Mark answers through the [Command Code gateway](https://commandcode.ai/docs/provider) using
+**DeepSeek V4.1 Flash** with selectable reasoning effort (Off / Low / High / Max; default High).
+
+Set `CMD_API_KEY` in `.env` for development, or paste a key in **Settings → Mark** (stored in
+`~/.markdown-viewer-app/config.json`, mode 0600). The app never exposes the key to the webview:
+requests go through the Rust backend, and the document text is sent to Command Code only when you
+ask Mark a question.
+
+Chats persist as JSON at `~/.markdown-viewer-app/chats/<date>/<id>.json`, including messages,
+reasoning, actions, and token/cost usage. Nothing is sent anywhere else, and stored reasoning is
+never replayed to the model.
+
 ## Download & install (Linux)
 
 Every `v*` tag is built by the [CI pipeline](.gitlab-ci.yml) and published on the
@@ -94,6 +115,7 @@ publishes them on the [Releases page](../../releases).
 - `src/` — frontend: plain HTML/CSS/JS (no framework), with Mermaid vendored for diagrams
 - `src-tauri/` — Rust backend (Tauri 2): Markdown rendering via
   [comrak](https://github.com/kivikakk/comrak), highlighting via syntect (two-face syntax set),
-  HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus file tree,
-  search, font listing, and PDF printing commands
+  HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the Command Code
+  gateway proxy (streaming SSE, reasoning, usage/cost), chat storage, file tree, search, font
+  listing, and PDF printing commands
 - `install.sh` — build + Linux desktop integration (desktop file, icons, MIME defaults)
