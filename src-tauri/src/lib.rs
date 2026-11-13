@@ -63,6 +63,9 @@ static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         .add_tag_attributes("input", ["type", "checked", "disabled"])
         .add_tag_attributes("a", ["aria-label", "data-heading-content"])
         .add_tag_attributes("img", ["width", "height"])
+        // Math from comrak's `math_dollars`/`math_code`; KaTeX renders it in the frontend.
+        .add_tag_attributes("span", ["data-math-style"])
+        .add_tag_attributes("code", ["data-math-style"])
         .link_rel(None);
     b
 });
@@ -78,6 +81,8 @@ fn options() -> Options<'static> {
     o.extension.tasklist = true;
     o.extension.footnotes = true;
     o.extension.alerts = true;
+    o.extension.math_dollars = true; // $inline$ and $$display$$
+    o.extension.math_code = true; // $`inline`$ and ```math blocks
     o.extension.header_id_prefix = Some(String::new());
     // Raw HTML is allowed through comrak and then sanitized by ammonia.
     o.render.r#unsafe = true;
@@ -333,6 +338,12 @@ mod tests {
         }
 
         let fm = render_markdown("---\nname: x\n---\n# Body".into());
+        let math = render_markdown("$a^2$ and $$\\sum x$$ and $5 or $6\n\n```math\nx\n```".into());
+        assert!(math.contains(r#"<span data-math-style="inline">a^2</span>"#), "{math}");
+        assert!(math.contains(r#"<span data-math-style="display">\sum x</span>"#), "{math}");
+        assert!(math.contains(r#"class="language-math" data-math-style="display""#), "{math}");
+        assert!(math.contains("$5 or $6"), "prices stay text: {math}");
+
         assert!(fm.contains("name") && fm.contains("language-yaml") && fm.contains("front-matter") && fm.contains(r#"id="body""#), "{fm}");
     }
 

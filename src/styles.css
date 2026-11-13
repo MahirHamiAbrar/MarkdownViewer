@@ -585,6 +585,9 @@ kbd {
 .mermaid-block { display: flex; justify-content: center; padding: 16px; border-radius: var(--radius-lg); border: 1px solid var(--border-subtle); overflow-x: auto; }
 .mermaid-block > svg { max-width: 100%; height: auto; }
 .mermaid-block.mermaid-error { display: block; padding: 0; border: 0; }
+.math-done .katex-display, .math-block.math-done { overflow-x: auto; overflow-y: hidden; }
+.math-block { margin: 1em 0; }
+.math-block > .katex-display { margin: 0; }
 .mermaid-msg { font-size: .85em; color: var(--danger); margin-bottom: 6px; }
 .code-tools {
   position: absolute; top: 6px; right: 6px; display: flex; align-items: center; gap: 6px; font-size: .78rem; color: var(--text-tertiary);
@@ -953,7 +956,7 @@ kbd {
   .md mark.find { background: none; color: inherit; }
   .md .anchor { display: none; }
   .md pre, .md pre code { white-space: pre-wrap; background: #F5F6F8 !important; }
-  .md pre, .table-wrap, .md img, .md blockquote, .mermaid-block { break-inside: avoid; }
+  .md pre, .table-wrap, .md img, .md blockquote, .mermaid-block, .katex-display { break-inside: avoid; }
   .md h1, .md h2, .md h3, .md h4 { break-after: avoid; }
   .md a.external::after { content: none; }
   @page { margin: 18mm 16mm; }

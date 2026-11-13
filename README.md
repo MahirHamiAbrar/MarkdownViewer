@@ -16,6 +16,7 @@ built with Tauri.
 - Syntax highlighting for ~200 languages (bat's syntax set), with per-block caching so the
   preview stays fast while you type
 - Mermaid diagrams render live in the preview
+- Math renders with KaTeX: `$inline$`, `$$display$$`, and ```` ```math ```` blocks
 - Find & replace with match case, whole word, and regular expressions (replace one or all)
 - Word count and cursor position in the status bar; undo/redo history
 
@@ -112,7 +113,7 @@ publishes them on the [Releases page](../../releases).
 
 ## Architecture
 
-- `src/` — frontend: plain HTML/CSS/JS (no framework), with Mermaid vendored for diagrams
+- `src/` — frontend: plain HTML/CSS/JS (no framework), with Mermaid and KaTeX vendored for diagrams and math
 - `src-tauri/` — Rust backend (Tauri 2): Markdown rendering via
   [comrak](https://github.com/kivikakk/comrak), highlighting via syntect (two-face syntax set),
   HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the Command Code

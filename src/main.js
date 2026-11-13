@@ -554,6 +554,15 @@ function patchPreview(html) {
 }
 
 function decorateRich(root, { mermaid = false } = {}) {
+  // ```math blocks arrive as <pre><code data-math-style>; typeset them, don't treat them as code.
+  for (const code of $$("pre > code[data-math-style]", root)) {
+    const block = document.createElement("div");
+    block.className = "math-block";
+    block.dataset.mathStyle = "display";
+    block.textContent = code.textContent;
+    code.parentElement.replaceWith(block);
+  }
+  for (const n of $$("[data-math-style]:not(.math-done)", root)) lazyRender(n);
   for (const pre of $$("pre", root)) {
     if (pre.parentElement?.classList.contains("code-block")) continue;
     const wrap = document.createElement("div");
@@ -566,7 +575,7 @@ function decorateRich(root, { mermaid = false } = {}) {
     if (mermaid && lang === "mermaid") {
       wrap.classList.add("mermaid-block");
       wrap.dataset.src = pre.textContent;
-      renderMermaid(wrap);
+      lazyRender(wrap);
       continue;
     }
     const tools = document.createElement("div");
@@ -601,6 +610,64 @@ function decoratePreview(root) {
     try { img.src = convertFileSrc(resolveLocal(src)); } catch { /* leave the broken image as-is */ }
   }
   decorateRich(root, { mermaid: true });
+}
+
+// ---------- lazy typesetting ----------
+// Typesetting every formula/diagram up front cost ~0.6 s at launch on a math-heavy note; only
+// those near the viewport are drawn, the rest as they scroll in (or all at once before printing).
+const lazyPending = new Set();
+const renderRich = (n) => (n.classList.contains("mermaid-block") ? renderMermaid(n) : renderMath([n]));
+const lazyObserver = new IntersectionObserver((entries) => {
+  for (const e of entries) {
+    if (!e.isIntersecting) continue;
+    lazyObserver.unobserve(e.target);
+    lazyPending.delete(e.target);
+    renderRich(e.target);
+  }
+  // Re-renders while typing replace nodes before they are seen; drop the detached ones.
+  if (lazyPending.size > 500) {
+    for (const n of lazyPending) if (!n.isConnected) { lazyObserver.unobserve(n); lazyPending.delete(n); }
+  }
+}, { rootMargin: "800px 0px" });
+function lazyRender(n) {
+  lazyPending.add(n);
+  lazyObserver.observe(n);
+}
+function renderAllPending() {
+  const nodes = [...lazyPending].filter((n) => n.isConnected);
+  for (const n of lazyPending) lazyObserver.unobserve(n);
+  lazyPending.clear();
+  return Promise.all(nodes.map(renderRich));
+}
+
+// ---------- math (KaTeX, loads with the first formula) ----------
+let katexLib = null;
+function loadKatex() {
+  return katexLib ||= new Promise((resolve, reject) => {
+    const css = document.createElement("link");
+    css.rel = "stylesheet";
+    css.href = "vendor/katex/katex.min.css";
+    const s = document.createElement("script");
+    s.src = "vendor/katex/katex.min.js";
+    s.onload = () => resolve(window.katex);
+    s.onerror = () => { katexLib = null; s.remove(); css.remove(); reject(new Error("Couldn't load the KaTeX renderer.")); };
+    document.head.append(css, s);
+  });
+}
+
+async function renderMath(nodes) {
+  if (!nodes.length) return;
+  let katex;
+  try { katex = await loadKatex(); } catch { return; } // the TeX source stays visible
+  for (const n of nodes) {
+    if (n.classList.contains("math-done")) continue;
+    const tex = n.textContent;
+    try {
+      katex.render(tex, n, { displayMode: n.dataset.mathStyle === "display", throwOnError: false, errorColor: "var(--danger)" });
+      n.title = tex;
+      n.classList.add("math-done");
+    } catch { n.textContent = tex; }
+  }
 }
 
 // ---------- mermaid (~5 MB, so it loads with the first diagram, never at startup) ----------
@@ -1378,6 +1445,7 @@ async function exportPdf() {
   if (el.doc.hidden) return;
   closeFind();
   await renderPreview(); // make sure the printed preview matches the editor
+  await renderAllPending(); // off-screen math and diagrams are drawn lazily
   try { await invoke("print_page"); } catch (err) { toast(`Couldn't open the print dialog. ${err}`, "error"); }
 }
 
