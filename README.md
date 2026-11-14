@@ -1,10 +1,10 @@
-# Markdown
+# MarkdownEditor
 
 A calm Markdown viewer and editor for the desktop. Open a file or a whole folder, read
 distraction-free, edit with a live preview, and export to PDF — in one small, native app
 built with Tauri.
 
-![Markdown showing this README in dark mode](docs/screenshot.png)
+![MarkdownEditor showing this README in dark mode](docs/screenshot.png)
 
 ## Features
 
@@ -38,57 +38,104 @@ built with Tauri.
 - Reader-friendly Sage and Plum themes (default, following the system), Paper, Midnight, Sepia, Dusk, E-ink and Forest, plus Light, Dark, Monokai, and Vercel, with an accent color picker
 - Configurable interface, document, and editor fonts (picks up the fonts installed on your system)
 - Reading width, line spacing, justified text, and code wrapping; editor tab width, autosave, and startup behavior
+- Saves are atomic, and unsaved text is recovered after a crash
 - Export the current document to PDF
 
 **Mark (AI)**
 - Right-side assistant that always sees the open document, including unsaved edits
+- Works with DeepSeek, OpenAI, Anthropic, OpenRouter, a local Ollama, or any OpenAI- or Anthropic-compatible endpoint
 - Select any text to reveal **Ask Mark**; the selection is attached alongside the full file
 - Streaming Markdown answers with an expandable **Thinking** disclosure and an **Actions** trace
 - Per-message token usage, plus chat totals and cost when the gateway reports it
-- Chats are saved under `~/.markdown-viewer-app/chats`, named by the model, and can be renamed or deleted
+- Chats are saved under `~/.markdowneditor/chats`, named by the model, and can be renamed or deleted
 - Large documents are sent as an outline; Mark reads and searches the parts it needs, and can search and read the other Markdown files of the open folder
 - **About you** notes and a **Memory** of lasting preferences personalize every chat (Settings → Mark)
 
 ## Mark (AI)
 
-Mark answers through the [Command Code gateway](https://commandcode.ai/docs/provider) using
-**DeepSeek V4.1 Flash** with selectable reasoning effort (Off / Low / High / Max; default High).
+Mark answers through a model provider you choose. Nothing is configured out of the box, and
+the document text is sent to that provider only when you ask Mark a question. With a local
+provider such as Ollama, nothing leaves your computer.
 
-Set `CMD_API_KEY` in `.env` for development, or paste a key in **Settings → Mark** (stored in
-`~/.markdown-viewer-app/config.json`, mode 0600). The app never exposes the key to the webview:
-requests go through the Rust backend, and the document text is sent to Command Code only when you
-ask Mark a question.
+### Adding a provider
 
-Chats persist as JSON at `~/.markdown-viewer-app/chats/<date>/<id>.json`, including messages,
-reasoning, actions, and token/cost usage. Nothing is sent anywhere else, and stored reasoning is
-never replayed to the model.
+**Settings → Mark → Add model provider.**
+
+- **Third-party model provider**: pick DeepSeek, OpenAI, Anthropic, OpenRouter, Ollama, or
+  Command Code and paste its API key (Ollama needs none). The model list is fetched from the
+  provider.
+- **Custom model API**: for any other endpoint. Enter a lowercase **Provider ID** (permanent:
+  chats and saved keys refer to it), the base URL, the API protocol (`openai-completions` or
+  `anthropic-messages`), a key, and model ids, or leave the models empty to fetch them.
+
+Pick the model, and its reasoning effort where it has one, from the menu in Mark's header. The
+choice becomes the default for new chats; each chat remembers its own.
+
+### API keys
+
+Keys are stored in the operating system's keychain (Secret Service on Linux, Keychain on macOS,
+Credential Manager on Windows). If no keychain is running, the key goes to
+`~/.markdowneditor/credentials.json`, readable by you only, and Settings says so. The webview
+never receives a key, only whether one exists and its last four characters. Requests are made by
+the Rust backend. An environment variable (`DEEPSEEK_API_KEY`, `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `CMD_API_KEY`) overrides the stored key for one run.
+
+### providers.json
+
+The same settings live in `~/.markdowneditor/providers.json` and can be edited by hand. Fields
+follow [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness): `api`, `baseURL`,
+`apiKeyEnv`, `reasoning` (default effort), `headers`, `compat`, and `models`. A model may declare
+its own effort levels; a model with none shows no effort menu.
+
+```json
+{
+  "providers": {
+    "my-gateway": {
+      "api": "openai-completions",
+      "baseURL": "https://gateway.example/v1",
+      "apiKeyEnv": "GATEWAY_API_KEY",
+      "models": [
+        { "id": "legacy-chat" },
+        { "id": "my-reasoner", "reasoningEfforts": { "off": null, "high": "high", "max": "max" } }
+      ]
+    }
+  }
+}
+```
+
+An entry for a built-in id (`deepseek`, `openai`, `anthropic`, `openrouter`, `ollama`,
+`commandcode`) overrides that provider field by field. `compat` switches: `maxTokensField`,
+`thinkingFormat: "deepseek"`, `reasoningFormat: "openrouter"`, `toolChoice: false`.
+
+Chats persist as JSON at `~/.markdowneditor/chats/<date>/<id>.json`, including messages,
+reasoning, actions, and token/cost usage. Stored reasoning is never replayed to the model.
 
 **Context.** A document up to 60,000 characters is sent whole; a larger one is sent as a heading
 outline with line numbers, and Mark fetches ranges with its `read_document` / `search_document`
 tools. With a folder open it also gets `list_files`, `search_files`, and `read_file`, limited to
 that folder's Markdown files. Long chats are folded into a summary once they pass about 48,000
-characters. The prompt is ordered so the gateway's prefix cache keeps hitting between turns.
+characters. The prompt is ordered so the provider's prefix cache keeps hitting between turns.
 
 **Personalization and memory.** Settings → Mark has an **About you** box that is included in every
 chat, and a **Memory** switch. With memory on, Mark saves lasting facts and preferences you mention
 (you get a toast each time) and you can delete any of them in Settings. Both live in
-`~/.markdown-viewer-app/memory.json` (mode 0600) and are sent to Command Code with your questions.
+`~/.markdowneditor/memory.json` (mode 0600) and are sent to the selected provider with your questions.
 
 ## Download & install (Linux)
 
 Every `v*` tag is built by the [CI pipeline](.gitlab-ci.yml) and published on the
 [Releases page](../../releases) — download a package and install it directly, no build required:
 
-- **`Markdown_<version>_amd64.deb`** — Debian, Ubuntu, and derivatives
-- **`Markdown_<version>_amd64.AppImage`** — any other distribution with a desktop
+- **`MarkdownEditor_<version>_amd64.deb`** — Debian, Ubuntu, and derivatives
+- **`MarkdownEditor_<version>_amd64.AppImage`** — any other distribution with a desktop
 
 ```sh
 # Debian / Ubuntu: installs the app and pulls in its system dependencies
-sudo apt install ./Markdown_<version>_amd64.deb
+sudo apt install ./MarkdownEditor_<version>_amd64.deb
 
 # AppImage: no installation, just make it executable and run it
-chmod +x Markdown_<version>_amd64.AppImage
-./Markdown_<version>_amd64.AppImage
+chmod +x MarkdownEditor_<version>_amd64.AppImage
+./MarkdownEditor_<version>_amd64.AppImage
 ```
 
 Both come with a desktop entry and Markdown file associations.
@@ -138,7 +185,7 @@ publishes them on the [Releases page](../../releases).
 - `src/` — frontend: plain HTML/CSS/JS (no framework), with Mermaid and KaTeX vendored for diagrams and math
 - `src-tauri/` — Rust backend (Tauri 2): Markdown rendering via
   [comrak](https://github.com/kivikakk/comrak), highlighting via syntect (two-face syntax set),
-  HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the Command Code
-  gateway proxy (streaming SSE, reasoning, usage/cost), chat storage, file tree, search, font
+  HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the model
+  provider layer (`providers.rs`, `ai.rs`, `anthropic.rs`: streaming, reasoning, usage/cost, keychain), chat storage, file tree, search, font
   listing, and PDF printing commands
 - `install.sh` — build + Linux desktop integration (desktop file, icons, MIME defaults)

@@ -1,11 +1,11 @@
 [package]
-name = "mdviewer"
+name = "markdowneditor"
 version = "0.2.0"
 description = "A calm Markdown viewer and editor"
 edition = "2021"
 
 [lib]
-name = "mdviewer_lib"
+name = "markdowneditor_lib"
 crate-type = ["rlib"]
 
 [build-dependencies]

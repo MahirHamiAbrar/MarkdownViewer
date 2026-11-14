@@ -818,7 +818,7 @@ function setMode(mode) {
 
 let shownDirty = false;
 function updateChrome() {
-  const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : "Markdown";
+  const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : "MarkdownEditor";
   shownDirty = isDirty();
   el.docName.textContent = name;
   el.docName.title = state.path || "";
