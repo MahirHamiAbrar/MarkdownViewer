@@ -381,6 +381,50 @@ async function settleUnsaved() {
   const choice = await confirmUnsaved();
   if (choice === "cancel") return false;
   if (choice === "save") return save();
+  clearDraft(); // discarded on purpose
+  return true;
+}
+
+// ---------- drafts: unsaved text survives a crash or power cut ----------
+let draftId = null;
+function draftKey() {
+  if (!state.path) return `untitled-${String(appWindow.label || "main").replace(/[^A-Za-z0-9-]/g, "")}`;
+  let hash = 5381; // djb2: only has to tell this user's own files apart
+  for (let i = 0; i < state.path.length; i++) hash = ((hash * 33) ^ state.path.charCodeAt(i)) >>> 0;
+  return `f${hash.toString(16)}-${state.path.length}`;
+}
+function clearDraft() {
+  if (!draftId) return;
+  invoke("draft_delete", { id: draftId }).catch(() => {});
+  draftId = null;
+}
+const draftSoon = debounce(() => {
+  if (!isDirty()) return clearDraft();
+  const id = draftKey();
+  if (draftId && draftId !== id) clearDraft();
+  draftId = id;
+  invoke("draft_save", { id, json: JSON.stringify({ path: state.path, text: state.text, savedAt: new Date().toISOString() }) }).catch(() => {});
+}, 2000);
+
+/** At startup: bring the newest leftover draft back as unsaved changes. Nothing on disk is touched. */
+async function restoreDraft() {
+  let drafts = [];
+  try {
+    drafts = (await invoke("drafts_list")).map(([id, json]) => ({ id, ...JSON.parse(json) }));
+  } catch { return false; }
+  const draft = drafts.filter((d) => typeof d.text === "string").sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)))[0];
+  if (!draft) return false;
+  if (draft.path) {
+    if (!(await openFile(draft.path, { quiet: true }))) return false; // file is gone: keep the draft for later
+    if (state.text === draft.text) { invoke("draft_delete", { id: draft.id }).catch(() => {}); return true; }
+  } else {
+    await newFile();
+  }
+  el.editor.value = draft.text;
+  draftId = draft.id;
+  editorChanged();
+  const when = new Date(draft.savedAt);
+  toast(`Restored unsaved changes${draft.path ? ` to “${baseName(draft.path)}”` : ""}${Number.isNaN(when.getTime()) ? "" : ` from ${when.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`}. Save to keep them, or close without saving to drop them.`);
   return true;
 }
 
@@ -442,6 +486,7 @@ async function save() {
     return false;
   }
   state.saved = state.text;
+  clearDraft();
   updateChrome();
   el.stSave.innerHTML = `${svg("check")}Saved`;
   return true;
@@ -458,6 +503,7 @@ async function saveAs() {
     return false;
   }
   Object.assign(state, { path, saved: state.text, untitled: false });
+  clearDraft();
   addRecent(path);
   store.set("lastFile", path);
   revealInTree(path);
@@ -826,6 +872,7 @@ function editorChanged() {
   wordsSoon();
   outlineSoon();
   autosaveSoon();
+  draftSoon();
   if (!el.findbar.hidden) findSoon();
 }
 el.editor.addEventListener("input", () => { if (!restoring) recordEdit(); editorChanged(); });
@@ -3491,6 +3538,7 @@ addEventListener("focus", () => {
   }, () => { /* fall back to full paths */ });
   const initial = fresh ? null : (await initialReq) || (state.settings.startup === "last" ? store.get("lastFile", null) : null);
   // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
+  if (!fresh && (await restoreDraft())) return;
   if (!initial || !(await openFile(initial, { quiet: true }))) {
     renderWelcome();
     el.welcome.hidden = false;
