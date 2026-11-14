@@ -81,12 +81,16 @@ const el = {
   aiMenu: $(".ai-menu"),
   aiKeyInput: $(".ai-key-input"),
   aiKeyStatus: $(".ai-key-status"),
+  aiProfile: $(".ai-profile"),
+  aiMemoryList: $(".ai-memory-list"),
   aiDelDlg: $(".dlg-ai-delete"),
   aiDelName: $(".ai-del-name"),
 };
 
 const MD_RE = /\.(md|markdown|mdx)$/i;
 const MAX_RECENTS = 30;
+const SIDEBAR_RECENTS = 6;
+const FONT_SIZES = ["13", "14", "16", "18"]; // the Font size setting's steps
 const ACCENTS = {
   blue: "#2A7BEF", red: "#F0505F", green: "#2FB458", purple: "#7B5CF5",
   pink: "#D14FA8", orange: "#FF9A2E", graphite: "#454C5C",
@@ -97,9 +101,11 @@ const TILE_COLORS = ["#2F80F5", "#F5822E", "#27B5C9", "#8C7CF0", "#F26B8A", "#4F
 const AI_MODEL = "deepseek/deepseek-v4.1-flash";
 const AI_MODEL_NAME = "DeepSeek V4.1 Flash";
 const AI_EFFORTS = [["off", "Off"], ["low", "Low"], ["high", "High"], ["max", "Max"]];
-const AI_MAX_DOC = 200_000;
 const AI_MAX_REASONING = 100_000;
-const AI_MAX_HISTORY = 50;
+const AI_TOOL_LABELS = {
+  read_document: "Read document", search_document: "Searched document", list_files: "Listed files",
+  search_files: "Searched folder", read_file: "Read file", remember: "Remembered", forget: "Forgot",
+};
 const aiEffortName = (value) => (AI_EFFORTS.find(([v]) => v === value) || ["high", "High"])[1];
 
 // ---------- persistence (localStorage, per-viewer conveniences) ----------
@@ -112,6 +118,12 @@ const store = {
   },
 };
 
+const DEFAULT_SETTINGS = {
+  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiMemory: "on",
+  lineHeight: "normal", align: "left", codeWrap: "scroll", tabSize: "2", autosave: "off", startup: "last",
+};
+const READ_WIDTHS = { narrow: "640px", normal: "760px", wide: "980px", full: "100%" };
+
 const state = {
   path: null,       // open file
   untitled: false,  // new-file buffer not saved anywhere yet
@@ -122,12 +134,13 @@ const state = {
   folder: store.get("folder", null),
   tree: [],
   expanded: new Set(),
-  settings: { theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", ...store.get("settings", {}) },
+  settings: { ...DEFAULT_SETTINGS, ...store.get("settings", {}) },
   home: "",
   sep: "/",
   ai: {
     open: false, chat: null, list: [], streaming: false, requestId: null, selection: null, reply: null,
     renderTimer: null, pinned: true, current: null, chip: null, deleteTarget: null, titleBusy: false,
+    memory: normalizeMemory(null), // what Mark knows about the user; lives in ~/.markdown-viewer-app/memory.json
   },
 };
 
@@ -206,7 +219,8 @@ function applySettings() {
   applyTheme(s.theme, el.root); // theme.js
   el.root.dataset.accent = s.accent;
   el.root.style.setProperty("--fs-root", `${s.fontSize}px`);
-  el.root.style.setProperty("--read-w", s.width === "wide" ? "980px" : "760px");
+  el.root.style.setProperty("--read-w", READ_WIDTHS[s.width] || READ_WIDTHS.normal);
+  for (const key of ["lineHeight", "align", "codeWrap", "tabSize"]) el.root.dataset[key] = s[key]; // styled in styles.css
   for (const [key, [cssVar, fallback]] of Object.entries(FONT_VARS)) {
     const name = s[key].replace(/["\\]/g, "");
     if (name) el.root.style.setProperty(cssVar, `"${name}", var(${fallback})`);
@@ -251,6 +265,10 @@ function openSettings() {
   for (const input of $$("[data-font]", el.settingsDlg)) input.value = state.settings[input.dataset.font];
   el.aiKeyInput.value = "";
   refreshAiStatus();
+  loadAiMemory().then(() => {
+    el.aiProfile.value = state.ai.memory.profile;
+    renderAiMemory();
+  });
   el.settingsDlg.showModal();
   if (fontsLoaded) return;
   fontsLoaded = true;
@@ -609,6 +627,7 @@ function decoratePreview(root) {
     if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src) && !src.startsWith("file:")) continue;
     try { img.src = convertFileSrc(resolveLocal(src)); } catch { /* leave the broken image as-is */ }
   }
+  for (const box of $$('li > input[type="checkbox"]', root)) box.disabled = false; // clicking one edits the source
   decorateRich(root, { mermaid: true });
 }
 
@@ -789,28 +808,93 @@ function updatePos() {
 }
 
 // ---------- editor ----------
-// Typing does the minimum synchronously; the preview follows live (never saved until Ctrl S).
+// Typing does the minimum synchronously; the preview follows live (saved on Ctrl S, or by Autosave when it is on).
 const wordsSoon = debounce(updateWords, 400);
 const findSoon = debounce(() => runFind(el.findInput.value, { keepIndex: true, scroll: false }), 150);
 const renderSoon = debounce(renderPreview, 120); // bursts of typing coalesce into one render
+// Untitled buffers are skipped: saving them opens a file dialog.
+const autosaveSoon = debounce(() => { if (state.settings.autosave === "on" && state.path && isDirty()) save(); }, 1500);
+const outlineSoon = debounce(() => { if (outlineKeyOf(scanSource(state.text).headings) !== outlineKey) renderSidebar(); }, 400);
 function editorChanged() {
   state.text = el.editor.value;
   driver = el.editor;
   if (isDirty() !== shownDirty) updateChrome();
   if (state.mode === "split") renderSoon(); // read mode re-renders on switch, edit mode has no preview
   wordsSoon();
+  outlineSoon();
+  autosaveSoon();
   if (!el.findbar.hidden) findSoon();
 }
 el.editor.addEventListener("input", () => { if (!restoring) recordEdit(); editorChanged(); });
 el.editor.addEventListener("keyup", updatePos);
 el.editor.addEventListener("scroll", () => { el.editorHl.scrollTop = el.editor.scrollTop; });
 el.editor.addEventListener("click", updatePos);
+// Typing one of these over a selection wraps it instead of replacing it.
+const WRAP_PAIRS = { "*": "*", "_": "_", "`": "`", "~": "~", "(": ")", "[": "]", "{": "}", '"': '"' };
+
+/** Wraps the selection in open/close. With `toggle`, an already-wrapped selection is unwrapped. `select` picks a placeholder inside `close`. */
+function wrapSelection(open, close = open, { toggle = true, select = null } = {}) {
+  if (state.mode === "read") return;
+  const v = el.editor.value;
+  const s = el.editor.selectionStart;
+  const e = el.editor.selectionEnd;
+  const inner = v.slice(s, e);
+  if (toggle && s >= open.length && v.slice(s - open.length, s) === open && v.slice(e, e + close.length) === close) {
+    editRange(s - open.length, e + close.length, inner);
+    el.editor.setSelectionRange(s - open.length, e - open.length);
+  } else {
+    editRange(s, e, open + inner + close);
+    const at = select ? e + open.length + close.indexOf(select) : s + open.length;
+    el.editor.setSelectionRange(at, select ? at + select.length : e + open.length);
+  }
+  updatePos();
+}
+
+/** Indents (or outdents) every line the selection touches by two spaces. */
+function indentLines(out) {
+  const v = el.editor.value;
+  const s = el.editor.selectionStart;
+  const e = el.editor.selectionEnd;
+  const ls = s ? v.lastIndexOf("\n", s - 1) + 1 : 0;
+  const end = e > s && v[e - 1] === "\n" ? e - 1 : e; // a selection ending at a line start doesn't include that line
+  const block = v.slice(ls, end);
+  const next = out ? block.replace(/^( {1,2}|\t)/gm, "") : block.replace(/^(?=.)/gm, "  ");
+  if (next === block) return;
+  editRange(ls, end, next);
+  if (s === e) { const at = Math.max(ls, s + next.length - block.length); el.editor.setSelectionRange(at, at); }
+  else el.editor.setSelectionRange(ls, ls + next.length);
+}
+
 el.editor.addEventListener("keydown", (e) => {
   const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+  const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing;
   const k = e.key.toLowerCase();
-  if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing) {
+  const s = el.editor.selectionStart;
+  const end = el.editor.selectionEnd;
+  if (e.key === "Tab" && plain) {
     e.preventDefault();
-    document.execCommand("insertText", false, "  ");
+    if (e.shiftKey || el.editor.value.slice(s, end).includes("\n")) indentLines(e.shiftKey);
+    else document.execCommand("insertText", false, "  ");
+  } else if (e.key === "Enter" && plain && !e.shiftKey && s === end) {
+    // Continue lists, task lists, quotes, and indentation; Enter on an empty item ends the list.
+    const v = el.editor.value;
+    const ls = s ? v.lastIndexOf("\n", s - 1) + 1 : 0;
+    const c = continuation(v.slice(ls, s)); // mdsource.js
+    if (c?.insert) { e.preventDefault(); document.execCommand("insertText", false, "\n" + c.insert); }
+    else if (c?.clear && (s === v.length || v[s] === "\n")) { e.preventDefault(); editRange(ls, s, ""); }
+  } else if (plain && s !== end && WRAP_PAIRS[e.key]) {
+    e.preventDefault();
+    wrapSelection(e.key, WRAP_PAIRS[e.key], { toggle: false });
+  } else if (mod && k === "i") {
+    e.preventDefault();
+    wrapSelection("*");
+  } else if (mod && k === "k") {
+    e.preventDefault();
+    wrapSelection("[", "](url)", { toggle: false, select: "url" });
+  } else if (mod && k === "b" && !e.shiftKey && s !== end) { // with nothing selected, Ctrl B still toggles the sidebar
+    e.preventDefault();
+    e.stopPropagation();
+    wrapSelection("**");
   } else if (mod && k === "z") {
     e.preventDefault();
     stepHistory(e.shiftKey ? 1 : -1);
@@ -1079,6 +1163,65 @@ function editRange(start, end, text) {
   document.execCommand(text ? "insertText" : "delete", false, text);
 }
 
+/** An edit made from the preview (a task checkbox): works in read mode too and leaves both panes where they are. */
+function applyEdit(start, end, text) {
+  if (state.mode === "read") { // the hidden editor can't take typed input
+    el.editor.value = state.text.slice(0, start) + text + state.text.slice(end);
+    recordEdit();
+    editorChanged();
+    renderPreview();
+  } else {
+    const top = el.editor.scrollTop;
+    editRange(start, end, text);
+    el.editor.scrollTop = top;
+    driver = el.previewPane; // the editor's scroll event must not drag the preview along
+  }
+}
+
+// ---------- outline ----------
+let outlineKey = ""; // headings shown in the sidebar, to skip re-rendering it while typing body text
+const outlineKeyOf = (heads) => heads.map((h) => h.level + h.text).join("\n");
+
+/** Scrolls the editor so `offset` is near the top, measured with the find mirror (textareas have no API for it). */
+function scrollEditorTo(offset) {
+  el.editorHl.innerHTML = `${escapeHtml(state.text.slice(0, offset))}<mark>​</mark>`;
+  el.editor.scrollTop = Math.max(0, el.editorHl.firstElementChild.offsetTop - 48);
+  renderHl();
+  if (find.index >= 0) gotoMatch(find.index, false);
+}
+
+async function gotoHeading(i) {
+  const heads = scanSource(state.text).headings; // mdsource.js
+  const h = heads[i];
+  if (!h) return;
+  if (state.mode === "edit") {
+    el.editor.focus({ preventScroll: true });
+    el.editor.setSelectionRange(h.offset, h.offset);
+    scrollEditorTo(h.offset);
+    return updatePos();
+  }
+  await renderPreview();
+  const shown = $$("h1, h2, h3, h4, h5, h6", el.preview);
+  // The source scan and the renderer can disagree (setext or HTML headings): then go by text.
+  const target = shown.length === heads.length ? shown[i] : shown.find((n) => n.textContent.trim() === h.text);
+  if (!target) return;
+  driver = el.previewPane;
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+el.preview.addEventListener("click", (e) => {
+  const box = e.target.closest('li > input[type="checkbox"]');
+  if (!box) return;
+  const boxes = $$('li > input[type="checkbox"]', el.preview);
+  const { tasks } = scanSource(state.text);
+  const at = tasks[boxes.indexOf(box)];
+  if (tasks.length !== boxes.length || at === undefined) {
+    box.checked = !box.checked;
+    return toast("Couldn't find this task in the source. Edit it in the editor instead.", "error");
+  }
+  applyEdit(at, at + 1, state.text[at] === " " ? "x" : " ");
+});
+
 function replacement(hit) {
   const r = el.replaceInput.value;
   if (!find.opts.regex) return r;
@@ -1162,9 +1305,21 @@ function treeHtml(nodes, depth) {
 function renderSidebar() {
   if (el.sbSearch.value.trim()) return; // search results own the list while a query is active
   let html = "";
-  html += `<div class="group-label"><span>Recent</span></div>`;
+  const heads = state.path || state.untitled ? scanSource(state.text).headings : [];
+  outlineKey = outlineKeyOf(heads);
+  if (heads.length) {
+    const open = store.get("outlineOpen", true);
+    const top = Math.min(...heads.map((h) => h.level));
+    html += `<div class="group-label"><span>Outline</span>
+      <button class="icon-btn" data-action="toggle-outline" aria-expanded="${open}" data-tip="${open ? "Collapse" : "Expand"}" aria-label="Toggle outline">${svg(open ? "up" : "down")}</button></div>`;
+    if (open) html += heads.map((h, i) => `<div class="nav-item tree-item outline-item" role="button" tabindex="0" data-heading="${i}"
+      style="padding-left:${10 + (h.level - top) * 12}px" title="${escapeHtml(h.text)}"><span class="nav-name">${escapeHtml(h.text)}</span></div>`).join("");
+  }
+  // The sidebar shows the latest few; History has the rest.
+  html += `<div class="group-label"><span>Recent</span>${state.recents.length > SIDEBAR_RECENTS
+    ? `<button class="icon-btn" data-action="history" data-tip="All ${state.recents.length} recent files" aria-label="Open history">${svg("clock")}</button>` : ""}</div>`;
   html += state.recents.length
-    ? state.recents.map((p) => navItem({
+    ? state.recents.slice(0, SIDEBAR_RECENTS).map((p) => navItem({
         path: p, name: baseName(p), sub: escapeHtml(prettyDir(p)), current: p === state.path,
         extra: `<span class="nav-remove" data-remove="${escapeHtml(p)}" role="button" aria-label="Remove from recent" data-tip="Remove from list">${svg("x")}</span>`,
       })).join("")
@@ -1209,7 +1364,10 @@ el.sbSearch.addEventListener("keydown", (e) => {
 });
 
 function activateNav(item) {
-  if (item.dataset.dir) {
+  if (item.dataset.heading) {
+    gotoHeading(Number(item.dataset.heading));
+    if (el.win.dataset.sidebar === "overlay") el.win.dataset.sidebar = "";
+  } else if (item.dataset.dir) {
     const d = item.dataset.dir;
     state.expanded.has(d) ? state.expanded.delete(d) : state.expanded.add(d);
     renderSidebar();
@@ -1269,7 +1427,7 @@ function showMenu(item, x, y) {
 
 el.sbList.addEventListener("contextmenu", (e) => {
   const item = e.target.closest(".nav-item");
-  if (!item) return;
+  if (!item || !(item.dataset.path || item.dataset.dir)) return;
   e.preventDefault();
   const r = item.getBoundingClientRect();
   const keyboard = !e.clientX && !e.clientY; // the Menu key reports no pointer position
@@ -1398,7 +1556,13 @@ const actions = {
   "open-file": pickFile,
   "open-folder": pickFolder,
   "refresh-folder": loadTree,
+  "settings-reset": () => {
+    state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiMemory: state.settings.aiMemory };
+    applySettings();
+    for (const input of $$("[data-font]", el.settingsDlg)) input.value = "";
+  },
   "close-folder": () => { state.folder = null; store.set("folder", null); loadTree(); },
+  "toggle-outline": () => { store.set("outlineOpen", !store.get("outlineOpen", true)); renderSidebar(); },
   "clear-search": () => { el.sbSearch.value = ""; runSearch(); el.sbSearch.focus(); },
   find: () => openFind(),
   "find-next": () => gotoMatch(find.index + 1),
@@ -1426,6 +1590,7 @@ const actions = {
   "ai-stop": stopAi,
   "ai-save-key": saveAiKey,
   "ai-clear-key": clearAiKey,
+  "ai-forget": (b) => changeAiMemory((memory) => { memory.items = memory.items.filter((item) => item.id !== b.dataset.id); }),
   "ai-clear-selection": () => { state.ai.selection = null; updateAiChrome(); el.aiInput.focus(); },
   "ai-clear-reply": () => { state.ai.reply = null; updateAiChrome(); el.aiInput.focus(); },
   "dialog-close": (b) => b.closest("dialog").close(),
@@ -1450,12 +1615,26 @@ async function exportPdf() {
 }
 
 // ---------- command palette ----------
-const PALETTE_GROUPS = ["File", "Editor", "View", "Mark", "Preferences", "Help"];
+const PALETTE_GROUPS = ["File", "Editor", "View", "Mark", "Preferences", "Help", "Headings", "Files"];
+const PALETTE_DYNAMIC_MAX = 8; // rows shown per Headings / Files group
 let paletteMatches = [];
 let paletteSel = 0;
 
-function paletteCommands() {
+function zoom(step) {
+  const i = FONT_SIZES.indexOf(state.settings.fontSize);
+  state.settings.fontSize = step ? FONT_SIZES[Math.max(0, Math.min(FONT_SIZES.length - 1, i + step))] : DEFAULT_SETTINGS.fontSize;
+  applySettings();
+}
+
+/** Commands, plus (only while searching) the open document's headings and every known file. */
+function paletteCommands(q) {
   const hasDoc = !!(state.path || state.untitled);
+  const editing = hasDoc && state.mode !== "read";
+  const found = !q ? [] : [
+    ...(hasDoc ? scanSource(state.text).headings : []).map((h, i) => ({ group: "Headings", icon: "chevron", title: h.text, run: () => gotoHeading(i) })),
+    ...[...new Set([...state.recents, ...folderFiles()])].filter((p) => p !== state.path)
+      .map((p) => ({ group: "Files", icon: "file", title: baseName(p), sub: prettyDir(p), run: () => openFile(p) })),
+  ];
   return [
     { group: "File", icon: "plus", title: "New File", key: "Ctrl N", keywords: "create blank untitled document", run: newFile },
     { group: "File", icon: "window", title: "New Window", key: "Ctrl Shift N", keywords: "another second instance blank", run: newWindow },
@@ -1471,12 +1650,19 @@ function paletteCommands() {
     { group: "Editor", icon: "refresh", title: "Cycle View Mode", key: "Ctrl E", keywords: "switch rotate toggle view", on: hasDoc, run: () => setMode({ read: "split", split: "edit", edit: "read" }[state.mode]) },
     { group: "Editor", icon: "search", title: "Find", key: "Ctrl F", keywords: "search text locate", on: hasDoc, run: () => openFind() },
     { group: "Editor", icon: "replace", title: "Find & Replace", key: "Ctrl H", keywords: "search substitute swap", on: hasDoc, run: () => openFind(undefined, { replace: true }) },
-    { group: "View", icon: "sidebar", title: "Toggle Sidebar", key: "Ctrl B", keywords: "files panel hide show tree", run: toggleSidebar },
+    { group: "Editor", icon: "edit", title: "Bold", key: "Ctrl B", keywords: "strong format selection", on: editing, run: () => wrapSelection("**") },
+    { group: "Editor", icon: "edit", title: "Italic", key: "Ctrl I", keywords: "emphasis format selection", on: editing, run: () => wrapSelection("*") },
+    { group: "Editor", icon: "edit", title: "Insert Link", key: "Ctrl K", keywords: "url hyperlink format selection", on: editing, run: () => wrapSelection("[", "](url)", { toggle: false, select: "url" }) },
+    { group: "View", icon: "sidebar", title: "Toggle Sidebar", key: "Ctrl B", keywords: "files panel hide show tree outline", run: toggleSidebar },
+    { group: "View", icon: "plus", title: "Zoom In", key: "Ctrl +", keywords: "bigger larger font size text", run: () => zoom(1) },
+    { group: "View", icon: "min", title: "Zoom Out", key: "Ctrl -", keywords: "smaller font size text", run: () => zoom(-1) },
+    { group: "View", icon: "refresh", title: "Reset Zoom", key: "Ctrl 0", keywords: "default font size text", run: () => zoom(0) },
     { group: "Mark", icon: "sparkle", title: "Toggle Mark", key: "Ctrl Shift M", keywords: "ai assistant chat sidebar panel", run: toggleAiPanel },
     { group: "Mark", icon: "plus", title: "New Chat with Mark", keywords: "ai assistant conversation clean", run: () => { openAiPanel(); newAiChat(); } },
     { group: "Mark", icon: "clock", title: "Mark Chat History", keywords: "ai assistant saved chats conversations", run: () => openAiHistory() },
     { group: "Preferences", icon: "settings", title: "Settings", key: "Ctrl ,", keywords: "preferences appearance theme themes dark light accent color font fonts typography typeface size reading width interface document editor", run: openSettings },
     { group: "Help", icon: "info", title: "About Markdown", keywords: "version about info credits app", run: openAbout },
+    ...found,
   ];
 }
 
@@ -1497,13 +1683,13 @@ function fuzzyScore(s, q) {
 
 function renderPalette() {
   const q = el.paletteInput.value.trim().toLowerCase();
-  paletteMatches = paletteCommands()
+  paletteMatches = paletteCommands(q)
     .map((c, i) => ({ c, i, s: fuzzyScore(`${c.title} ${c.keywords || ""}`.toLowerCase(), q) }))
     .filter((x) => x.s >= 0)
     .sort((a, b) => b.s - a.s || a.i - b.i);
   paletteMatches.forEach((x, mi) => (x.mi = mi));
   const groups = PALETTE_GROUPS
-    .map((g, gi) => ({ g, gi, rows: paletteMatches.filter((x) => x.c.group === g) }))
+    .map((g, gi) => ({ g, gi, rows: paletteMatches.filter((x) => x.c.group === g).slice(0, g === "Headings" || g === "Files" ? PALETTE_DYNAMIC_MAX : undefined) }))
     .filter((x) => x.rows.length);
   // While searching, float the group holding the best match to the top (so Enter runs it);
   // with no query, keep the familiar menu order.
@@ -1512,7 +1698,7 @@ function renderPalette() {
     `<div class="pg-label">${g}</div><div class="pg-box">` + rows.map((x) => {
       const c = x.c;
       return `<button class="palette-row${c.on === false ? " is-disabled" : ""}" data-mi="${x.mi}">
-        ${svg(c.icon)}<span class="pr-title">${escapeHtml(c.title)}</span>${c.key ? `<kbd>${escapeHtml(c.key)}</kbd>` : ""}</button>`;
+        ${svg(c.icon)}<span class="pr-title">${escapeHtml(c.title)}</span>${c.sub ? `<span class="pr-sub">${escapeHtml(c.sub)}</span>` : ""}${c.key ? `<kbd>${escapeHtml(c.key)}</kbd>` : ""}</button>`;
     }).join("") + "</div>").join("") || `<div class="palette-empty">No matching commands</div>`;
   selectPalette(0);
 }
@@ -1600,6 +1786,10 @@ document.addEventListener("keydown", (e) => {
     e: () => state.path && setMode({ read: "split", split: "edit", edit: "read" }[state.mode]),
     b: toggleSidebar,
     ",": actions.settings,
+    "=": () => zoom(1),
+    "+": () => zoom(1),
+    "-": () => zoom(-1),
+    "0": () => zoom(0),
   }[k];
   if (run) { e.preventDefault(); run(); }
 });
@@ -1768,17 +1958,30 @@ async function saveAiChat() {
   }
 }
 
-function documentBlock() {
+function aiDocument() {
   const file = currentFileMeta();
-  if (!file) return "No document is currently open. Answer from the conversation alone.";
-  const text = state.text || "";
-  const truncated = text.length > AI_MAX_DOC;
-  const dirty = state.path ? state.text !== state.saved : state.untitled;
-  return `Name: ${file.name}\nPath: ${file.path || "(unsaved buffer)"}${dirty ? " (unsaved edits)" : ""}\n\n<document>\n${truncated ? text.slice(0, AI_MAX_DOC) : text}\n</document>${truncated ? `\n\n[The document was truncated to its first ${AI_MAX_DOC} characters.]` : ""}`;
+  if (!file) return null;
+  return { name: file.name, path: file.path, text: state.text || "", dirty: state.path ? state.text !== state.saved : state.untitled };
 }
 
-function systemPrompt() {
-  return `You are Mark, the built-in AI assistant in the Markdown desktop app. Help the user read, understand, and edit the document they have open. Reply in GitHub-flavored Markdown. Use fenced code blocks with language tags. Be concise and reference the document when useful.\n\n## Current document\n${documentBlock()}`;
+const aiMemoryOn = () => state.settings.aiMemory !== "off";
+const aiDocIsLarge = (doc) => Boolean(doc && doc.text.length > MARK_LIMITS.fullDoc);
+const relPath = (path) => (state.folder && path.startsWith(state.folder) ? path.slice(state.folder.length).replace(/^[\\/]/, "") : path);
+
+// Parts are ordered from rarely to often changing; see markctx.js.
+function systemPrompt(chat) {
+  const files = folderFiles().length;
+  return [
+    MARK_RULES,
+    memoryContext(state.ai.memory, aiMemoryOn()),
+    `## Session\nDate: ${localDate()}${files ? `\nOpen folder: ${state.folder} (${files} Markdown files)` : ""}`,
+    documentContext(aiDocument(), scanSource),
+    chat.summary ? `## Earlier in this conversation (summary)\n${chat.summary}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function aiTools() {
+  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFolder: folderFiles().length > 0, memory: aiMemoryOn() });
 }
 
 function apiUserContent(message) {
@@ -1795,9 +1998,10 @@ function apiUserContent(message) {
 }
 
 function buildApiMessages(chat) {
-  const history = chat.messages.filter((message) => !(message.role === "assistant" && !message.content)).slice(-AI_MAX_HISTORY);
+  // Past turns go as plain text: tool results are not replayed, and summarised turns are skipped.
+  const history = chat.messages.slice(chat.summarizedCount || 0).filter((message) => !(message.role === "assistant" && !message.content));
   return [
-    { role: "system", content: systemPrompt() },
+    { role: "system", content: systemPrompt(chat) },
     ...history.map((message) => ({
       role: message.role,
       content: message.role === "user" ? apiUserContent(message) : message.content,
@@ -1806,10 +2010,18 @@ function buildApiMessages(chat) {
 }
 
 function seedActions(chat, effort) {
-  const file = currentFileMeta();
-  const actions = [file
-    ? { kind: "context", id: "context", label: `Read ${file.name}`, detail: `${fmtCount((state.text || "").length)} characters`, status: "done" }
-    : { kind: "context", id: "context", label: "No document open", detail: "Answering without file context", status: "done" }];
+  const doc = aiDocument();
+  const actions = [!doc
+    ? { kind: "context", id: "context", label: "No document open", detail: "Answering without file context", status: "done" }
+    : aiDocIsLarge(doc)
+      ? { kind: "context", id: "context", label: `Outlined ${doc.name}`, detail: `${fmtCount(doc.text.length)} characters · reads parts on demand`, status: "done" }
+      : { kind: "context", id: "context", label: `Read ${doc.name}`, detail: `${fmtCount(doc.text.length)} characters`, status: "done" }];
+  const memory = state.ai.memory;
+  const remembered = aiMemoryOn() ? memory.items.length : 0;
+  if (remembered || memory.profile.trim()) {
+    const detail = [memory.profile.trim() && "your notes", remembered && `${remembered} ${remembered === 1 ? "memory" : "memories"}`].filter(Boolean).join(" · ");
+    actions.push({ kind: "context", id: "memory", label: "Personalized", detail, status: "done" });
+  }
   const lastUser = [...chat.messages].reverse().find((message) => message.role === "user");
   if (lastUser?.selection?.text) {
     actions.push({ kind: "selection", id: "selection", label: "Selection attached", detail: selectionDetail(lastUser.selection), status: "done" });
@@ -2057,9 +2269,9 @@ function handleAiEvent(event) {
       updateThinking(node, msg, false);
       const details = $(".ai-think", node);
       if (details.open && !details.dataset.userToggled) details.open = false;
-      setAiPhase(node, "Writing…");
       node.classList.add("streaming");
     }
+    setAiPhase(node, "Writing…");
     msg.content = `${msg.content || ""}${event.text || ""}`;
     scheduleChatRender(node, msg);
     scrollAiIfPinned();
@@ -2067,23 +2279,14 @@ function handleAiEvent(event) {
   }
 
   if (event.type === "action") {
-    const id = event.id || event.name || "tool";
-    let action = (msg.actions || []).find((item) => item.id === id);
-    if (!action) {
-      action = { kind: "tool", id, label: event.name || "Tool", detail: "", status: "running" };
-      msg.actions.push(action);
-    }
-    action.label = event.name || action.label;
-    action.detail = event.detail || action.detail;
-    action.status = event.status || "running";
+    aiToolAction(current, event.id, event.name);
     updateTrace(node, msg);
     scrollAiIfPinned();
     return;
   }
 
   if (event.type === "done") {
-    msg.timing = { firstTokenMs: event.first_token_ms || 0, durationMs: event.duration_ms || 0 };
-    msg.usage = { input: event.input_tokens || 0, output: event.output_tokens || 0, reasoning: event.reasoning_tokens || 0, cost: event.cost ?? null };
+    // Usage and timing are summed over the answer's rounds in runAssistantTurn.
     if (!current.contentStarted && current.reasoningStart) msg.reasoningDurationMs = Math.round(performance.now() - current.reasoningStart);
   }
 }
@@ -2146,7 +2349,6 @@ async function requestAssistant() {
   if (think) delete think.dataset.userToggled;
   state.ai.current = { msg: assistant, node, index, reasoningStart: 0, contentStarted: false };
   state.ai.streaming = true;
-  state.ai.requestId = (crypto.randomUUID && crypto.randomUUID()) || `${nanoid8()}${nanoid8()}`;
   setAiPhase(node, "Reading document…");
   setAiStreaming(true);
   scrollAiIfPinned(true);
@@ -2154,14 +2356,7 @@ async function requestAssistant() {
   const channel = new Channel();
   channel.onmessage = handleAiEvent;
   try {
-    const reply = await invoke("ai_chat", {
-      requestId: state.ai.requestId,
-      model: AI_MODEL,
-      effort,
-      messages: buildApiMessages(chat),
-      onEvent: channel,
-    });
-    await finalizeAssistant(reply);
+    await finalizeAssistant(await runAssistantTurn(chat, effort, channel));
   } catch (err) {
     failAssistant(String(err));
   } finally {
@@ -2171,6 +2366,206 @@ async function requestAssistant() {
     state.ai.current?.node.classList.remove("streaming");
   }
 }
+
+/** The trace entry for one tool call; ids are scoped by round because fallback ids repeat. */
+function aiToolAction(current, id, name) {
+  const key = `${current.round || 1}:${id || name}`;
+  let action = current.msg.actions.find((item) => item.id === key);
+  if (!action) {
+    action = { kind: "tool", id: key, label: AI_TOOL_LABELS[name] || name || "Tool", detail: "", status: "running" };
+    current.msg.actions.push(action);
+  }
+  return action;
+}
+
+/** Folds old turns into `chat.summary` once the history outgrows its budget. */
+async function compactAiHistory(chat, current) {
+  const sent = chat.messages.slice(0, -1); // without the pending reply
+  const from = Math.min(chat.summarizedCount || 0, sent.length);
+  const start = historyStart(sent, from);
+  if (start <= from) return;
+  setAiPhase(current.node, "Summarizing earlier messages…");
+  const transcript = sent.slice(from, start).filter((message) => message.content)
+    .map((message) => `${message.role === "user" ? "User" : "Mark"}: ${message.content.slice(0, 3000)}`).join("\n\n");
+  const action = { kind: "context", id: "summary", label: "Summarized earlier messages", detail: `${start - from} messages`, status: "done" };
+  try {
+    chat.summary = await invoke("ai_complete", {
+      model: AI_MODEL,
+      maxTokens: 800,
+      messages: [
+        { role: "system", content: "You compress a conversation between a user and Mark, a Markdown document assistant, so it can continue without the original messages. Keep what the user is trying to do, decisions and conclusions reached, facts and names later turns may rely on, and any open question. Drop pleasantries and exact wording. Write terse bullet points, at most 250 words." },
+        { role: "user", content: `${chat.summary ? `Summary so far:\n${chat.summary}\n\n` : ""}Messages to fold in:\n${transcript}\n\nUpdated summary:` },
+      ],
+    });
+  } catch {
+    action.label = "Dropped earlier messages"; // the request must still fit; the old summary, if any, stays
+  }
+  chat.summarizedCount = start;
+  current.msg.actions.splice(-1, 0, action); // before the model entry
+  updateTrace(current.node, current.msg);
+}
+
+/** One answer: model rounds with tool calls in between. Tool results live only inside this turn. */
+async function runAssistantTurn(chat, effort, channel) {
+  const current = state.ai.current;
+  await compactAiHistory(chat, current);
+  const messages = buildApiMessages(chat);
+  const tools = aiTools();
+  const started = performance.now();
+  const usage = { input: 0, output: 0, reasoning: 0, cost: null };
+  const content = [];
+  const reasoning = [];
+  let firstTokenMs = 0;
+  for (let round = 1; ; round++) {
+    current.round = round;
+    state.ai.requestId = (crypto.randomUUID && crypto.randomUUID()) || `${nanoid8()}${nanoid8()}`;
+    const reply = await invoke("ai_chat", {
+      requestId: state.ai.requestId,
+      model: AI_MODEL,
+      effort,
+      messages,
+      tools,
+      toolChoice: round < MARK_LIMITS.toolRounds ? "auto" : "none", // the last round has to answer
+      onEvent: channel,
+    });
+    usage.input += reply.usage?.input || 0;
+    usage.output += reply.usage?.output || 0;
+    usage.reasoning += reply.usage?.reasoning || 0;
+    if (reply.usage?.cost != null) usage.cost = (usage.cost || 0) + reply.usage.cost;
+    firstTokenMs ||= reply.timing?.firstTokenMs || 0;
+    if (reply.content) content.push(reply.content);
+    if (reply.reasoning) reasoning.push(reply.reasoning);
+    const calls = reply.stopped ? [] : reply.toolCalls || [];
+    if (!calls.length) {
+      return {
+        content: content.join("\n\n"),
+        reasoning: reasoning.join("\n\n").slice(0, AI_MAX_REASONING),
+        stopped: reply.stopped,
+        usage,
+        timing: { firstTokenMs, durationMs: Math.round(performance.now() - started) },
+      };
+    }
+    messages.push({
+      role: "assistant",
+      content: reply.content || "",
+      ...(reply.reasoning ? { reasoning_content: reply.reasoning } : {}),
+      tool_calls: calls.map((call) => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })),
+    });
+    for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, content: await runAiToolCall(current, call) });
+    // Later rounds stream onto the same message; keep what is shown equal to what will be saved.
+    current.msg.content = content.length ? `${content.join("\n\n")}\n\n` : "";
+    current.msg.reasoning = reasoning.length ? `${reasoning.join("\n\n")}\n\n` : "";
+    setAiPhase(current.node, "Thinking…");
+  }
+}
+
+async function runAiToolCall(current, call) {
+  const action = aiToolAction(current, call.id, call.name);
+  let result;
+  try {
+    let args = {};
+    try { args = JSON.parse(call.arguments || "{}") || {}; } catch { throw new Error("The arguments were not valid JSON."); }
+    const out = await runAiTool(call.name, args);
+    result = out.result;
+    action.detail = out.detail;
+    action.status = "done";
+  } catch (err) {
+    result = `Error: ${err?.message || err}`;
+    action.detail = String(err?.message || err);
+    action.status = "error";
+  }
+  updateTrace(current.node, current.msg);
+  scrollAiIfPinned();
+  return result;
+}
+
+/** Runs one tool for the model. Files are limited to the Markdown files of the open folder. */
+async function runAiTool(name, args) {
+  const text = state.text || "";
+  const query = String(args.query || "").trim();
+  const count = (n, word) => `${n} ${word}${n === 1 ? "" : word.endsWith("ch") ? "es" : "s"}`;
+  switch (name) {
+    case "read_document": {
+      if (!currentFileMeta()) throw new Error("No document is open.");
+      const out = numberedLines(text, args.start_line, args.end_line);
+      return { result: out.text, detail: `Lines ${out.from}–${out.to}` };
+    }
+    case "search_document": {
+      if (!query) throw new Error("query is empty.");
+      const { hits, total } = searchLines(text, query);
+      const head = `${count(total, "matching line")}${total > hits.length ? ` (first ${hits.length} shown)` : ""}:`;
+      return { result: total ? `${head}\n${hits.map((hit) => `${hit.line}: ${hit.text}`).join("\n")}` : "No matches.", detail: `“${query}” · ${count(total, "match")}` };
+    }
+    case "list_files": {
+      const files = folderFiles().map(relPath);
+      const shown = files.slice(0, 400);
+      return { result: `${shown.join("\n") || "The open folder has no Markdown files."}${files.length > shown.length ? `\n[${files.length - shown.length} more not listed; use search_files.]` : ""}`, detail: count(files.length, "file") };
+    }
+    case "search_files": {
+      if (!query) throw new Error("query is empty.");
+      const hits = await invoke("search_files", { paths: folderFiles(), query });
+      const shown = hits.slice(0, 60);
+      return { result: shown.length ? shown.map((hit) => `${relPath(hit.path)}:${hit.line}: ${hit.text}`).join("\n") : "No matches.", detail: `“${query}” · ${count(hits.length, "match")}` };
+    }
+    case "read_file": {
+      const want = String(args.path || "").trim().replace(/^\.[\\/]/, "");
+      const path = folderFiles().find((file) => file === want || relPath(file) === want);
+      if (!path) throw new Error("No such Markdown file in the open folder. Call list_files for valid paths.");
+      const out = numberedLines(path === state.path ? text : await invoke("read_file", { path }), args.start_line, args.end_line);
+      return { result: `${relPath(path)}\n${out.text}`, detail: `${relPath(path)} · lines ${out.from}–${out.to}` };
+    }
+    case "remember": {
+      if (!aiMemoryOn()) throw new Error("Memory is turned off.");
+      const item = await changeAiMemory((memory) => rememberFact(memory, args.text));
+      if (!item) throw new Error("text is empty.");
+      toast(`Mark will remember: ${item.text}`);
+      return { result: `Saved as [${item.id}].`, detail: item.text };
+    }
+    case "forget": {
+      if (!aiMemoryOn()) throw new Error("Memory is turned off.");
+      const gone = await changeAiMemory((memory) => {
+        const at = memory.items.findIndex((item) => item.id === String(args.id || "").replace(/[[\]]/g, ""));
+        return at === -1 ? null : memory.items.splice(at, 1)[0];
+      });
+      if (!gone) throw new Error("No memory has that id.");
+      return { result: "Deleted.", detail: gone.text };
+    }
+    default:
+      throw new Error(`Unknown tool "${name}".`);
+  }
+}
+
+async function loadAiMemory() {
+  try {
+    state.ai.memory = normalizeMemory(JSON.parse(await invoke("memory_load")));
+  } catch { /* keep what is in memory */ }
+}
+
+/** Reload (another window may have written), change, write back. Returns what `change` returns. */
+async function changeAiMemory(change) {
+  await loadAiMemory();
+  const out = change(state.ai.memory);
+  try {
+    await invoke("memory_save", { json: JSON.stringify({ version: 1, ...state.ai.memory }) });
+  } catch (err) {
+    toast(`Couldn't save Mark's memory. ${err}`, "error");
+    throw err;
+  }
+  renderAiMemory();
+  return out;
+}
+
+function renderAiMemory() {
+  const items = state.ai.memory.items;
+  el.aiMemoryList.innerHTML = items.length
+    ? items.map((item) => `<li><span>${escapeHtml(item.text)}</span><button class="icon-btn sm" data-action="ai-forget" data-id="${escapeHtml(item.id)}" data-tip="Forget" aria-label="Forget this memory">${svg("trash")}</button></li>`).join("")
+    : `<li class="ai-memory-empty">Nothing saved yet. Tell Mark about yourself or how you like answers, and it will remember.</li>`;
+}
+
+el.aiProfile.addEventListener("input", debounce(() => {
+  const profile = el.aiProfile.value.slice(0, MARK_LIMITS.profile);
+  changeAiMemory((memory) => { memory.profile = profile; }).catch(() => {});
+}, 500));
 
 async function finalizeAssistant(reply) {
   const current = state.ai.current;
@@ -2261,8 +2656,9 @@ async function maybeGenerateTitle() {
   if (!isDefault) return;
   state.ai.titleBusy = true;
   try {
-    const title = await invoke("ai_title", {
+    const title = await invoke("ai_complete", {
       model: AI_MODEL,
+      maxTokens: 100,
       messages: [
         { role: "system", content: "You name chat conversations. Reply with a short title of 2 to 5 words. No quotes, no markdown, no punctuation at the end." },
         { role: "user", content: `Document: ${chat.file?.name || "none"}\nQuestion: ${firstUser.content.slice(0, 2000)}\nAnswer: ${firstAssistant.content.slice(0, 2000)}\n\nTitle:` },
@@ -2834,6 +3230,43 @@ webview.onDragDropEvent((e) => {
   }
 });
 
+// Other tools (git, another editor, an AI agent) change files while this window sits in the background:
+// on return, show what is on disk. Unsaved edits are never replaced, only flagged.
+let diskWarned = null; // disk content already warned about, so refocusing doesn't repeat the toast
+async function checkDisk() {
+  const p = state.path;
+  if (!p) return;
+  let text;
+  try { text = await invoke("read_file", { path: p }); } catch { return; } // deleted or unreadable: keep the buffer
+  if (p !== state.path || text === state.saved) return;
+  if (text === state.text) { state.saved = text; return updateChrome(); } // e.g. our own save still in flight
+  if (isDirty()) {
+    if (diskWarned !== text) toast(`“${baseName(p)}” changed on disk. Saving will overwrite those changes.`, "error");
+    diskWarned = text;
+    return;
+  }
+  const tops = [el.editor.scrollTop, el.previewPane.scrollTop];
+  Object.assign(state, { saved: text, text });
+  el.editor.value = text;
+  resetHistory();
+  await renderPreview();
+  [el.editor.scrollTop, el.previewPane.scrollTop] = tops;
+  updateChrome();
+  renderSidebar();
+  if (!el.findbar.hidden) runFind(el.findInput.value, { keepIndex: true, scroll: false });
+}
+
+addEventListener("focus", () => {
+  checkDisk();
+  if (!state.folder) return;
+  const dir = state.folder;
+  invoke("list_markdown", { dir }).then((tree) => {
+    if (dir !== state.folder || JSON.stringify(tree) === JSON.stringify(state.tree)) return;
+    state.tree = tree;
+    renderSidebar();
+  }, () => { /* folder gone: keep the last listing */ });
+});
+
 // ---------- boot ----------
 (async function boot() {
   applySettings();
@@ -2848,6 +3281,7 @@ webview.onDragDropEvent((e) => {
   const aiW = store.get("aiW", null);
   if (aiW) el.root.style.setProperty("--ai-w", aiW);
   if (store.get("aiOpen", false)) openAiPanel({ focus: false });
+  loadAiMemory();
   if (state.folder) loadTree().catch(() => setFolder(null));
   // Path shortening (~) is cosmetic: apply it when it arrives instead of waiting on it.
   tpath.homeDir().then((home) => {
@@ -2857,7 +3291,7 @@ webview.onDragDropEvent((e) => {
     renderWelcome();
     if (state.path) updateChrome();
   }, () => { /* fall back to full paths */ });
-  const initial = fresh ? null : (await initialReq) || store.get("lastFile", null);
+  const initial = fresh ? null : (await initialReq) || (state.settings.startup === "last" ? store.get("lastFile", null) : null);
   // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
   if (!initial || !(await openFile(initial, { quiet: true }))) {
     renderWelcome();

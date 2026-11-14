@@ -14,6 +14,8 @@ const API_URL: &str = "https://api.commandcode.ai/provider/v1/chat/completions";
 const MODEL: &str = "deepseek/deepseek-v4.1-flash";
 const EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
 const MAX_REASONING_CHARS: usize = 100_000;
+const MAX_MEMORY_BYTES: usize = 256_000;
+const MAX_TOOLS: usize = 16;
 
 pub struct AiState {
     client: reqwest::Client,
@@ -68,10 +70,20 @@ pub struct AiTiming {
 
 #[derive(Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct AiToolCall {
+    pub id: String,
+    pub name: String,
+    /// JSON text exactly as the model wrote it; the webview parses and runs it.
+    pub arguments: String,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AiReply {
     pub content: String,
     pub reasoning: String,
     pub actions: Vec<AiAction>,
+    pub tool_calls: Vec<AiToolCall>,
     pub stopped: bool,
     pub usage: AiUsage,
     pub timing: AiTiming,
@@ -199,6 +211,12 @@ pub fn ai_set_key(app: AppHandle, key: Option<String>) -> Result<AiStatus, Strin
     }
 
     let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    write_private(&path, &text)?;
+    Ok(ai_status(app))
+}
+
+/// Atomic write, readable by the owner only.
+fn write_private(path: &Path, text: &str) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
     #[cfg(unix)]
@@ -206,8 +224,31 @@ pub fn ai_set_key(app: AppHandle, key: Option<String>) -> Result<AiStatus, Strin
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(ai_status(app))
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
+}
+
+/// What Mark knows about the user: `{ "profile": "...", "items": [{ id, text, createdAt }] }`.
+/// ponytail: one small JSON file, rewritten whole. Move to SQLite if memory ever needs search or grows past a few hundred facts.
+#[tauri::command(async)]
+pub fn memory_load(app: AppHandle) -> String {
+    app_dir(&app)
+        .ok()
+        .and_then(|dir| std::fs::read_to_string(dir.join("memory.json")).ok())
+        .unwrap_or_else(|| "{}".into())
+}
+
+#[tauri::command(async)]
+pub fn memory_save(app: AppHandle, json: String) -> Result<(), String> {
+    if json.len() > MAX_MEMORY_BYTES {
+        return Err("Memory is too large.".into());
+    }
+    let value: Value = serde_json::from_str(&json).map_err(|e| format!("Invalid memory JSON: {e}"))?;
+    if !value.is_object() {
+        return Err("Invalid memory JSON: expected an object.".into());
+    }
+    let dir = app_dir(&app)?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    write_private(&dir.join("memory.json"), &json)
 }
 
 #[tauri::command]
@@ -218,6 +259,7 @@ pub fn ai_cancel(state: State<'_, AiState>, request_id: String) {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // one argument per field of the webview call
 pub async fn ai_chat(
     app: AppHandle,
     state: State<'_, AiState>,
@@ -225,8 +267,18 @@ pub async fn ai_chat(
     model: String,
     effort: String,
     messages: Vec<Value>,
+    tools: Option<Vec<Value>>,
+    tool_choice: Option<String>,
     on_event: Channel<AiEvent>,
 ) -> Result<AiReply, String> {
+    let tools = tools.unwrap_or_default();
+    if tools.len() > MAX_TOOLS {
+        return Err("Too many tools.".into());
+    }
+    let tool_choice = tool_choice.unwrap_or_else(|| "auto".into());
+    if !["auto", "none"].contains(&tool_choice.as_str()) {
+        return Err("Unsupported tool choice.".into());
+    }
     if model != MODEL {
         return Err("Unsupported model.".into());
     }
@@ -243,21 +295,7 @@ pub async fn ai_chat(
     let (key, _) = resolve_key(&app)?;
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancels.lock().unwrap().insert(request_id.clone(), cancel.clone());
-    let result = stream_chat(&state.client, &key, &model, &effort, &messages, &cancel, &on_event).await;
-    state.cancels.lock().unwrap().remove(&request_id);
-    result
-}
-
-async fn stream_chat(
-    client: &reqwest::Client,
-    key: &str,
-    model: &str,
-    effort: &str,
-    messages: &[Value],
-    cancel: &AtomicBool,
-    on_event: &Channel<AiEvent>,
-) -> Result<AiReply, String> {
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": messages,
         "stream": true,
@@ -265,12 +303,27 @@ async fn stream_chat(
         "max_tokens": 8192,
         "reasoning_effort": effort,
     });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools);
+        body["tool_choice"] = Value::String(tool_choice);
+    }
+    let result = stream_chat(&state.client, &key, &body, &cancel, &on_event).await;
+    state.cancels.lock().unwrap().remove(&request_id);
+    result
+}
 
+async fn stream_chat(
+    client: &reqwest::Client,
+    key: &str,
+    body: &Value,
+    cancel: &AtomicBool,
+    on_event: &Channel<AiEvent>,
+) -> Result<AiReply, String> {
     let started = Instant::now();
     let response = client
         .post(API_URL)
         .bearer_auth(key)
-        .json(&body)
+        .json(body)
         .send()
         .await
         .map_err(|e| network_error(&e))?;
@@ -319,6 +372,10 @@ async fn stream_chat(
     };
     for action in &mut reply.actions {
         action.status = "done".into();
+    }
+    // A stopped stream may hold half-written arguments; never hand those out to be run.
+    if !reply.stopped {
+        reply.tool_calls = parser.tool_calls();
     }
     let _ = on_event.send(AiEvent::Done {
         input_tokens: usage.input,
@@ -381,11 +438,13 @@ fn apply_stream_item(
 }
 
 #[tauri::command]
-pub async fn ai_title(
+/// One short non-streamed completion: chat titles and conversation summaries.
+pub async fn ai_complete(
     app: AppHandle,
     state: State<'_, AiState>,
     model: String,
     messages: Vec<Value>,
+    max_tokens: u32,
 ) -> Result<String, String> {
     if model != MODEL {
         return Err("Unsupported model.".into());
@@ -395,7 +454,7 @@ pub async fn ai_title(
         "model": model,
         "messages": messages,
         "stream": false,
-        "max_tokens": 100,
+        "max_tokens": max_tokens.clamp(1, 1200),
         "reasoning_effort": "off",
     });
     let response = state
@@ -412,7 +471,7 @@ pub async fn ai_title(
         return Err(http_error(status.as_u16(), &text));
     }
     let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let title = value
+    let text = value
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
@@ -422,10 +481,10 @@ pub async fn ai_title(
         .unwrap_or("")
         .trim()
         .to_string();
-    if title.is_empty() {
-        return Err("The gateway returned an empty title.".into());
+    if text.is_empty() {
+        return Err("The gateway returned an empty reply.".into());
     }
-    Ok(title)
+    Ok(text)
 }
 
 fn push_capped(target: &mut String, text: &str, cap: usize) {
@@ -524,6 +583,10 @@ struct ToolCall {
     arguments: String,
 }
 
+fn tool_id(index: usize, call: &ToolCall) -> String {
+    if call.id.is_empty() { format!("tool-{index}") } else { call.id.clone() }
+}
+
 #[derive(Default)]
 struct SseParser {
     buf: Vec<u8>,
@@ -542,6 +605,21 @@ impl SseParser {
             }
         }
         out
+    }
+
+    fn tool_calls(&self) -> Vec<AiToolCall> {
+        let mut indexes: Vec<_> = self.tools.keys().copied().collect();
+        indexes.sort_unstable();
+        indexes
+            .into_iter()
+            .map(|index| (index, &self.tools[&index]))
+            .filter(|(_, call)| !call.name.is_empty())
+            .map(|(index, call)| AiToolCall {
+                id: tool_id(index, call),
+                name: call.name.clone(),
+                arguments: call.arguments.clone(),
+            })
+            .collect()
     }
 
     /// Flush a final line that arrived without its trailing newline.
@@ -618,9 +696,8 @@ impl SseParser {
                 entry.arguments.push_str(arguments);
             }
             if !entry.name.is_empty() {
-                let id = if entry.id.is_empty() { format!("tool-{index}") } else { entry.id.clone() };
                 out.push(StreamItem::Action {
-                    id,
+                    id: tool_id(index, entry),
                     name: entry.name.clone(),
                     detail: entry.arguments.clone(),
                 });
@@ -667,6 +744,9 @@ data: [DONE]"#,
             _ => None,
         });
         assert_eq!(usage, Some((10, 4, 2, Some(0.00042))));
+        let calls = parser.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!((calls[0].id.as_str(), calls[0].name.as_str(), calls[0].arguments.as_str()), ("call_1", "search", "query more"));
         assert!(items.contains(&StreamItem::Done));
     }
 

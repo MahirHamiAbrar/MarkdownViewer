@@ -63,6 +63,7 @@ test:
   script:
     - npm ci
     - node --check src/main.js
+    - node src/mdsource.js
     - bash -n install.sh
     - cargo test --manifest-path src-tauri/Cargo.toml
 

@@ -19,17 +19,25 @@ built with Tauri.
 - Math renders with KaTeX: `$inline$`, `$$display$$`, and ```` ```math ```` blocks
 - Find & replace with match case, whole word, and regular expressions (replace one or all)
 - Word count and cursor position in the status bar; undo/redo history
+- Editor helpers: Enter continues lists, task lists, and quotes; Tab / Shift Tab indent the selected
+  lines; typing `*`, `_`, `` ` ``, or a bracket over a selection wraps it; Ctrl B / Ctrl I / Ctrl K
+  for bold, italic, and links
+- Click a task-list checkbox in the preview to tick it in the source
 
 **Files**
 - Sidebar with a folder tree of all Markdown files (`.md`, `.markdown`, `.mdx`)
 - Search across file names *and* file contents
+- Document outline in the sidebar; click a heading to jump to it
+- Command palette (Ctrl Shift P) runs commands, opens files by name, and jumps to headings
+- Files changed on disk by another program reload when you return to the window (unsaved edits are kept)
 - Recent files on the welcome screen
 - Drag-and-drop or dialog to open files/folders; opens as the default app for Markdown files
 
 **Look & feel**
 - Frameless, translucent window with custom chrome (minimize / maximize / close)
-- Light and dark themes, with an accent color picker
+- Reader-friendly Sage and Plum themes (default, following the system), Paper, Midnight, Sepia, Dusk, E-ink and Forest, plus Light, Dark, Monokai, and Vercel, with an accent color picker
 - Configurable interface, document, and editor fonts (picks up the fonts installed on your system)
+- Reading width, line spacing, justified text, and code wrapping; editor tab width, autosave, and startup behavior
 - Export the current document to PDF
 
 **Mark (AI)**
@@ -38,6 +46,8 @@ built with Tauri.
 - Streaming Markdown answers with an expandable **Thinking** disclosure and an **Actions** trace
 - Per-message token usage, plus chat totals and cost when the gateway reports it
 - Chats are saved under `~/.markdown-viewer-app/chats`, named by the model, and can be renamed or deleted
+- Large documents are sent as an outline; Mark reads and searches the parts it needs, and can search and read the other Markdown files of the open folder
+- **About you** notes and a **Memory** of lasting preferences personalize every chat (Settings → Mark)
 
 ## Mark (AI)
 
@@ -52,6 +62,17 @@ ask Mark a question.
 Chats persist as JSON at `~/.markdown-viewer-app/chats/<date>/<id>.json`, including messages,
 reasoning, actions, and token/cost usage. Nothing is sent anywhere else, and stored reasoning is
 never replayed to the model.
+
+**Context.** A document up to 60,000 characters is sent whole; a larger one is sent as a heading
+outline with line numbers, and Mark fetches ranges with its `read_document` / `search_document`
+tools. With a folder open it also gets `list_files`, `search_files`, and `read_file`, limited to
+that folder's Markdown files. Long chats are folded into a summary once they pass about 48,000
+characters. The prompt is ordered so the gateway's prefix cache keeps hitting between turns.
+
+**Personalization and memory.** Settings → Mark has an **About you** box that is included in every
+chat, and a **Memory** switch. With memory on, Mark saves lasting facts and preferences you mention
+(you get a toast each time) and you can delete any of them in Settings. Both live in
+`~/.markdown-viewer-app/memory.json` (mode 0600) and are sent to Command Code with your questions.
 
 ## Download & install (Linux)
 
@@ -106,6 +127,7 @@ Tests and checks:
 ```sh
 cargo test --manifest-path src-tauri/Cargo.toml
 node --check src/main.js
+node src/mdsource.js
 ```
 
 CI runs the tests on every push and, on a `v*` tag, builds the `.deb` and `.AppImage` and
