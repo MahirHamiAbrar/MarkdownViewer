@@ -79,14 +79,19 @@ const el = {
   aiStop: $(".ai-stop"),
   aiSelChip: $(".ai-selchip"),
   aiMenu: $(".ai-menu"),
-  aiKeyInput: $(".ai-key-input"),
-  aiKeyStatus: $(".ai-key-status"),
+  aiModelName: $(".ai-model-name"),
+  aiProviders: $(".ai-providers"),
+  provDlg: $(".dlg-provider"),
+  aiProfile: $(".ai-profile"),
+  aiMemoryList: $(".ai-memory-list"),
   aiDelDlg: $(".dlg-ai-delete"),
   aiDelName: $(".ai-del-name"),
 };
 
 const MD_RE = /\.(md|markdown|mdx)$/i;
 const MAX_RECENTS = 30;
+const SIDEBAR_RECENTS = 6;
+const FONT_SIZES = ["13", "14", "16", "18"]; // the Font size setting's steps
 const ACCENTS = {
   blue: "#2A7BEF", red: "#F0505F", green: "#2FB458", purple: "#7B5CF5",
   pink: "#D14FA8", orange: "#FF9A2E", graphite: "#454C5C",
@@ -94,13 +99,18 @@ const ACCENTS = {
 // Setting -> [CSS variable, what it falls back to]
 const FONT_VARS = { fontUi: ["--font-ui", "--font-ui-base"], fontEditor: ["--font-editor", "--font-mono"], fontView: ["--font-view", "--font-ui"] };
 const TILE_COLORS = ["#2F80F5", "#F5822E", "#27B5C9", "#8C7CF0", "#F26B8A", "#4F7CF0", "#35B864", "#6B7384"];
-const AI_MODEL = "deepseek/deepseek-v4.1-flash";
-const AI_MODEL_NAME = "DeepSeek V4.1 Flash";
-const AI_EFFORTS = [["off", "Off"], ["low", "Low"], ["high", "High"], ["max", "Max"]];
-const AI_MAX_DOC = 200_000;
+// Effort levels come from each model; this is only their menu order and wording.
+const AI_EFFORT_ORDER = ["off", "auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const AI_EFFORT_INFO = {
+  off: ["Off", "Fastest"], auto: ["Auto", "Model default"], none: ["None", "Fastest"], minimal: ["Minimal", "Fast"], low: ["Low", "Quick"],
+  medium: ["Medium", "Balanced"], high: ["High", "Deeper"], xhigh: ["Extra high", "Thorough"], max: ["Max", "Deepest"],
+};
 const AI_MAX_REASONING = 100_000;
-const AI_MAX_HISTORY = 50;
-const aiEffortName = (value) => (AI_EFFORTS.find(([v]) => v === value) || ["high", "High"])[1];
+const AI_TOOL_LABELS = {
+  read_document: "Read document", search_document: "Searched document", list_files: "Listed files",
+  search_files: "Searched folder", read_file: "Read file", remember: "Remembered", forget: "Forgot",
+};
+const aiEffortName = (value) => AI_EFFORT_INFO[value]?.[0] || value || "";
 
 // ---------- persistence (localStorage, per-viewer conveniences) ----------
 const store = {
@@ -112,6 +122,12 @@ const store = {
   },
 };
 
+const DEFAULT_SETTINGS = {
+  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiProvider: "", aiModel: "", aiMemory: "on",
+  lineHeight: "normal", align: "left", codeWrap: "scroll", tabSize: "2", autosave: "off", startup: "last",
+};
+const READ_WIDTHS = { narrow: "640px", normal: "760px", wide: "980px", full: "100%" };
+
 const state = {
   path: null,       // open file
   untitled: false,  // new-file buffer not saved anywhere yet
@@ -122,12 +138,14 @@ const state = {
   folder: store.get("folder", null),
   tree: [],
   expanded: new Set(),
-  settings: { theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", ...store.get("settings", {}) },
+  settings: { ...DEFAULT_SETTINGS, ...store.get("settings", {}) },
   home: "",
   sep: "/",
   ai: {
     open: false, chat: null, list: [], streaming: false, requestId: null, selection: null, reply: null,
     renderTimer: null, pinned: true, current: null, chip: null, deleteTarget: null, titleBusy: false,
+    providers: [], // model providers with their key status; see providers.rs
+    memory: normalizeMemory(null), // what Mark knows about the user; lives in ~/.markdowneditor/memory.json
   },
 };
 
@@ -206,7 +224,8 @@ function applySettings() {
   applyTheme(s.theme, el.root); // theme.js
   el.root.dataset.accent = s.accent;
   el.root.style.setProperty("--fs-root", `${s.fontSize}px`);
-  el.root.style.setProperty("--read-w", s.width === "wide" ? "980px" : "760px");
+  el.root.style.setProperty("--read-w", READ_WIDTHS[s.width] || READ_WIDTHS.normal);
+  for (const key of ["lineHeight", "align", "codeWrap", "tabSize"]) el.root.dataset[key] = s[key]; // styled in styles.css
   for (const [key, [cssVar, fallback]] of Object.entries(FONT_VARS)) {
     const name = s[key].replace(/["\\]/g, "");
     if (name) el.root.style.setProperty(cssVar, `"${name}", var(${fallback})`);
@@ -216,7 +235,7 @@ function applySettings() {
     for (const b of $$("button", seg)) b.setAttribute("aria-checked", String(b.dataset.value === s[seg.dataset.setting]));
   }
   for (const b of $$(".swatch")) b.setAttribute("aria-checked", String(b.dataset.accent === s.accent));
-  el.aiEffortLabel.textContent = aiEffortName(s.aiEffort);
+  updateAiModelLabel();
   store.set("settings", s);
   if (mermaidTheme && mermaidTheme !== `${el.root.dataset.theme}|${el.root.dataset.palette}|${el.root.dataset.accent}`) {
     for (const block of $$(".mermaid-block", el.preview)) renderMermaid(block);
@@ -235,7 +254,6 @@ el.settingsDlg.addEventListener("click", (e) => {
   const seg = e.target.closest("[data-setting] button");
   if (seg) {
     const key = seg.parentElement.dataset.setting;
-    if (key === "aiEffort") { setAiEffort(seg.dataset.value); return; }
     state.settings[key] = seg.dataset.value;
   }
   if (sw || seg) applySettings();
@@ -249,8 +267,11 @@ let fontsLoaded = false;
 function openSettings() {
   applySettings();
   for (const input of $$("[data-font]", el.settingsDlg)) input.value = state.settings[input.dataset.font];
-  el.aiKeyInput.value = "";
-  refreshAiStatus();
+  loadAiProviders();
+  loadAiMemory().then(() => {
+    el.aiProfile.value = state.ai.memory.profile;
+    renderAiMemory();
+  });
   el.settingsDlg.showModal();
   if (fontsLoaded) return;
   fontsLoaded = true;
@@ -360,6 +381,50 @@ async function settleUnsaved() {
   const choice = await confirmUnsaved();
   if (choice === "cancel") return false;
   if (choice === "save") return save();
+  clearDraft(); // discarded on purpose
+  return true;
+}
+
+// ---------- drafts: unsaved text survives a crash or power cut ----------
+let draftId = null;
+function draftKey() {
+  if (!state.path) return `untitled-${String(appWindow.label || "main").replace(/[^A-Za-z0-9-]/g, "")}`;
+  let hash = 5381; // djb2: only has to tell this user's own files apart
+  for (let i = 0; i < state.path.length; i++) hash = ((hash * 33) ^ state.path.charCodeAt(i)) >>> 0;
+  return `f${hash.toString(16)}-${state.path.length}`;
+}
+function clearDraft() {
+  if (!draftId) return;
+  invoke("draft_delete", { id: draftId }).catch(() => {});
+  draftId = null;
+}
+const draftSoon = debounce(() => {
+  if (!isDirty()) return clearDraft();
+  const id = draftKey();
+  if (draftId && draftId !== id) clearDraft();
+  draftId = id;
+  invoke("draft_save", { id, json: JSON.stringify({ path: state.path, text: state.text, savedAt: new Date().toISOString() }) }).catch(() => {});
+}, 2000);
+
+/** At startup: bring the newest leftover draft back as unsaved changes. Nothing on disk is touched. */
+async function restoreDraft() {
+  let drafts = [];
+  try {
+    drafts = (await invoke("drafts_list")).map(([id, json]) => ({ id, ...JSON.parse(json) }));
+  } catch { return false; }
+  const draft = drafts.filter((d) => typeof d.text === "string").sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)))[0];
+  if (!draft) return false;
+  if (draft.path) {
+    if (!(await openFile(draft.path, { quiet: true }))) return false; // file is gone: keep the draft for later
+    if (state.text === draft.text) { invoke("draft_delete", { id: draft.id }).catch(() => {}); return true; }
+  } else {
+    await newFile();
+  }
+  el.editor.value = draft.text;
+  draftId = draft.id;
+  editorChanged();
+  const when = new Date(draft.savedAt);
+  toast(`Restored unsaved changes${draft.path ? ` to “${baseName(draft.path)}”` : ""}${Number.isNaN(when.getTime()) ? "" : ` from ${when.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`}. Save to keep them, or close without saving to drop them.`);
   return true;
 }
 
@@ -421,6 +486,7 @@ async function save() {
     return false;
   }
   state.saved = state.text;
+  clearDraft();
   updateChrome();
   el.stSave.innerHTML = `${svg("check")}Saved`;
   return true;
@@ -437,6 +503,7 @@ async function saveAs() {
     return false;
   }
   Object.assign(state, { path, saved: state.text, untitled: false });
+  clearDraft();
   addRecent(path);
   store.set("lastFile", path);
   revealInTree(path);
@@ -609,6 +676,7 @@ function decoratePreview(root) {
     if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src) && !src.startsWith("file:")) continue;
     try { img.src = convertFileSrc(resolveLocal(src)); } catch { /* leave the broken image as-is */ }
   }
+  for (const box of $$('li > input[type="checkbox"]', root)) box.disabled = false; // clicking one edits the source
   decorateRich(root, { mermaid: true });
 }
 
@@ -750,7 +818,7 @@ function setMode(mode) {
 
 let shownDirty = false;
 function updateChrome() {
-  const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : "Markdown";
+  const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : "MarkdownEditor";
   shownDirty = isDirty();
   el.docName.textContent = name;
   el.docName.title = state.path || "";
@@ -789,28 +857,94 @@ function updatePos() {
 }
 
 // ---------- editor ----------
-// Typing does the minimum synchronously; the preview follows live (never saved until Ctrl S).
+// Typing does the minimum synchronously; the preview follows live (saved on Ctrl S, or by Autosave when it is on).
 const wordsSoon = debounce(updateWords, 400);
 const findSoon = debounce(() => runFind(el.findInput.value, { keepIndex: true, scroll: false }), 150);
 const renderSoon = debounce(renderPreview, 120); // bursts of typing coalesce into one render
+// Untitled buffers are skipped: saving them opens a file dialog.
+const autosaveSoon = debounce(() => { if (state.settings.autosave === "on" && state.path && isDirty()) save(); }, 1500);
+const outlineSoon = debounce(() => { if (outlineKeyOf(scanSource(state.text).headings) !== outlineKey) renderSidebar(); }, 400);
 function editorChanged() {
   state.text = el.editor.value;
   driver = el.editor;
   if (isDirty() !== shownDirty) updateChrome();
   if (state.mode === "split") renderSoon(); // read mode re-renders on switch, edit mode has no preview
   wordsSoon();
+  outlineSoon();
+  autosaveSoon();
+  draftSoon();
   if (!el.findbar.hidden) findSoon();
 }
 el.editor.addEventListener("input", () => { if (!restoring) recordEdit(); editorChanged(); });
 el.editor.addEventListener("keyup", updatePos);
 el.editor.addEventListener("scroll", () => { el.editorHl.scrollTop = el.editor.scrollTop; });
 el.editor.addEventListener("click", updatePos);
+// Typing one of these over a selection wraps it instead of replacing it.
+const WRAP_PAIRS = { "*": "*", "_": "_", "`": "`", "~": "~", "(": ")", "[": "]", "{": "}", '"': '"' };
+
+/** Wraps the selection in open/close. With `toggle`, an already-wrapped selection is unwrapped. `select` picks a placeholder inside `close`. */
+function wrapSelection(open, close = open, { toggle = true, select = null } = {}) {
+  if (state.mode === "read") return;
+  const v = el.editor.value;
+  const s = el.editor.selectionStart;
+  const e = el.editor.selectionEnd;
+  const inner = v.slice(s, e);
+  if (toggle && s >= open.length && v.slice(s - open.length, s) === open && v.slice(e, e + close.length) === close) {
+    editRange(s - open.length, e + close.length, inner);
+    el.editor.setSelectionRange(s - open.length, e - open.length);
+  } else {
+    editRange(s, e, open + inner + close);
+    const at = select ? e + open.length + close.indexOf(select) : s + open.length;
+    el.editor.setSelectionRange(at, select ? at + select.length : e + open.length);
+  }
+  updatePos();
+}
+
+/** Indents (or outdents) every line the selection touches by two spaces. */
+function indentLines(out) {
+  const v = el.editor.value;
+  const s = el.editor.selectionStart;
+  const e = el.editor.selectionEnd;
+  const ls = s ? v.lastIndexOf("\n", s - 1) + 1 : 0;
+  const end = e > s && v[e - 1] === "\n" ? e - 1 : e; // a selection ending at a line start doesn't include that line
+  const block = v.slice(ls, end);
+  const next = out ? block.replace(/^( {1,2}|\t)/gm, "") : block.replace(/^(?=.)/gm, "  ");
+  if (next === block) return;
+  editRange(ls, end, next);
+  if (s === e) { const at = Math.max(ls, s + next.length - block.length); el.editor.setSelectionRange(at, at); }
+  else el.editor.setSelectionRange(ls, ls + next.length);
+}
+
 el.editor.addEventListener("keydown", (e) => {
   const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
+  const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing;
   const k = e.key.toLowerCase();
-  if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing) {
+  const s = el.editor.selectionStart;
+  const end = el.editor.selectionEnd;
+  if (e.key === "Tab" && plain) {
     e.preventDefault();
-    document.execCommand("insertText", false, "  ");
+    if (e.shiftKey || el.editor.value.slice(s, end).includes("\n")) indentLines(e.shiftKey);
+    else document.execCommand("insertText", false, "  ");
+  } else if (e.key === "Enter" && plain && !e.shiftKey && s === end) {
+    // Continue lists, task lists, quotes, and indentation; Enter on an empty item ends the list.
+    const v = el.editor.value;
+    const ls = s ? v.lastIndexOf("\n", s - 1) + 1 : 0;
+    const c = continuation(v.slice(ls, s)); // mdsource.js
+    if (c?.insert) { e.preventDefault(); document.execCommand("insertText", false, "\n" + c.insert); }
+    else if (c?.clear && (s === v.length || v[s] === "\n")) { e.preventDefault(); editRange(ls, s, ""); }
+  } else if (plain && s !== end && WRAP_PAIRS[e.key]) {
+    e.preventDefault();
+    wrapSelection(e.key, WRAP_PAIRS[e.key], { toggle: false });
+  } else if (mod && k === "i") {
+    e.preventDefault();
+    wrapSelection("*");
+  } else if (mod && k === "k") {
+    e.preventDefault();
+    wrapSelection("[", "](url)", { toggle: false, select: "url" });
+  } else if (mod && k === "b" && !e.shiftKey && s !== end) { // with nothing selected, Ctrl B still toggles the sidebar
+    e.preventDefault();
+    e.stopPropagation();
+    wrapSelection("**");
   } else if (mod && k === "z") {
     e.preventDefault();
     stepHistory(e.shiftKey ? 1 : -1);
@@ -1079,6 +1213,65 @@ function editRange(start, end, text) {
   document.execCommand(text ? "insertText" : "delete", false, text);
 }
 
+/** An edit made from the preview (a task checkbox): works in read mode too and leaves both panes where they are. */
+function applyEdit(start, end, text) {
+  if (state.mode === "read") { // the hidden editor can't take typed input
+    el.editor.value = state.text.slice(0, start) + text + state.text.slice(end);
+    recordEdit();
+    editorChanged();
+    renderPreview();
+  } else {
+    const top = el.editor.scrollTop;
+    editRange(start, end, text);
+    el.editor.scrollTop = top;
+    driver = el.previewPane; // the editor's scroll event must not drag the preview along
+  }
+}
+
+// ---------- outline ----------
+let outlineKey = ""; // headings shown in the sidebar, to skip re-rendering it while typing body text
+const outlineKeyOf = (heads) => heads.map((h) => h.level + h.text).join("\n");
+
+/** Scrolls the editor so `offset` is near the top, measured with the find mirror (textareas have no API for it). */
+function scrollEditorTo(offset) {
+  el.editorHl.innerHTML = `${escapeHtml(state.text.slice(0, offset))}<mark>​</mark>`;
+  el.editor.scrollTop = Math.max(0, el.editorHl.firstElementChild.offsetTop - 48);
+  renderHl();
+  if (find.index >= 0) gotoMatch(find.index, false);
+}
+
+async function gotoHeading(i) {
+  const heads = scanSource(state.text).headings; // mdsource.js
+  const h = heads[i];
+  if (!h) return;
+  if (state.mode === "edit") {
+    el.editor.focus({ preventScroll: true });
+    el.editor.setSelectionRange(h.offset, h.offset);
+    scrollEditorTo(h.offset);
+    return updatePos();
+  }
+  await renderPreview();
+  const shown = $$("h1, h2, h3, h4, h5, h6", el.preview);
+  // The source scan and the renderer can disagree (setext or HTML headings): then go by text.
+  const target = shown.length === heads.length ? shown[i] : shown.find((n) => n.textContent.trim() === h.text);
+  if (!target) return;
+  driver = el.previewPane;
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+el.preview.addEventListener("click", (e) => {
+  const box = e.target.closest('li > input[type="checkbox"]');
+  if (!box) return;
+  const boxes = $$('li > input[type="checkbox"]', el.preview);
+  const { tasks } = scanSource(state.text);
+  const at = tasks[boxes.indexOf(box)];
+  if (tasks.length !== boxes.length || at === undefined) {
+    box.checked = !box.checked;
+    return toast("Couldn't find this task in the source. Edit it in the editor instead.", "error");
+  }
+  applyEdit(at, at + 1, state.text[at] === " " ? "x" : " ");
+});
+
 function replacement(hit) {
   const r = el.replaceInput.value;
   if (!find.opts.regex) return r;
@@ -1162,9 +1355,21 @@ function treeHtml(nodes, depth) {
 function renderSidebar() {
   if (el.sbSearch.value.trim()) return; // search results own the list while a query is active
   let html = "";
-  html += `<div class="group-label"><span>Recent</span></div>`;
+  const heads = state.path || state.untitled ? scanSource(state.text).headings : [];
+  outlineKey = outlineKeyOf(heads);
+  if (heads.length) {
+    const open = store.get("outlineOpen", true);
+    const top = Math.min(...heads.map((h) => h.level));
+    html += `<div class="group-label"><span>Outline</span>
+      <button class="icon-btn" data-action="toggle-outline" aria-expanded="${open}" data-tip="${open ? "Collapse" : "Expand"}" aria-label="Toggle outline">${svg(open ? "up" : "down")}</button></div>`;
+    if (open) html += heads.map((h, i) => `<div class="nav-item tree-item outline-item" role="button" tabindex="0" data-heading="${i}"
+      style="padding-left:${10 + (h.level - top) * 12}px" title="${escapeHtml(h.text)}"><span class="nav-name">${escapeHtml(h.text)}</span></div>`).join("");
+  }
+  // The sidebar shows the latest few; History has the rest.
+  html += `<div class="group-label"><span>Recent</span>${state.recents.length > SIDEBAR_RECENTS
+    ? `<button class="icon-btn" data-action="history" data-tip="All ${state.recents.length} recent files" aria-label="Open history">${svg("clock")}</button>` : ""}</div>`;
   html += state.recents.length
-    ? state.recents.map((p) => navItem({
+    ? state.recents.slice(0, SIDEBAR_RECENTS).map((p) => navItem({
         path: p, name: baseName(p), sub: escapeHtml(prettyDir(p)), current: p === state.path,
         extra: `<span class="nav-remove" data-remove="${escapeHtml(p)}" role="button" aria-label="Remove from recent" data-tip="Remove from list">${svg("x")}</span>`,
       })).join("")
@@ -1209,7 +1414,10 @@ el.sbSearch.addEventListener("keydown", (e) => {
 });
 
 function activateNav(item) {
-  if (item.dataset.dir) {
+  if (item.dataset.heading) {
+    gotoHeading(Number(item.dataset.heading));
+    if (el.win.dataset.sidebar === "overlay") el.win.dataset.sidebar = "";
+  } else if (item.dataset.dir) {
     const d = item.dataset.dir;
     state.expanded.has(d) ? state.expanded.delete(d) : state.expanded.add(d);
     renderSidebar();
@@ -1269,7 +1477,7 @@ function showMenu(item, x, y) {
 
 el.sbList.addEventListener("contextmenu", (e) => {
   const item = e.target.closest(".nav-item");
-  if (!item) return;
+  if (!item || !(item.dataset.path || item.dataset.dir)) return;
   e.preventDefault();
   const r = item.getBoundingClientRect();
   const keyboard = !e.clientX && !e.clientY; // the Menu key reports no pointer position
@@ -1398,7 +1606,13 @@ const actions = {
   "open-file": pickFile,
   "open-folder": pickFolder,
   "refresh-folder": loadTree,
+  "settings-reset": () => {
+    state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiProvider: state.settings.aiProvider, aiModel: state.settings.aiModel, aiMemory: state.settings.aiMemory };
+    applySettings();
+    for (const input of $$("[data-font]", el.settingsDlg)) input.value = "";
+  },
   "close-folder": () => { state.folder = null; store.set("folder", null); loadTree(); },
+  "toggle-outline": () => { store.set("outlineOpen", !store.get("outlineOpen", true)); renderSidebar(); },
   "clear-search": () => { el.sbSearch.value = ""; runSearch(); el.sbSearch.focus(); },
   find: () => openFind(),
   "find-next": () => gotoMatch(find.index + 1),
@@ -1424,8 +1638,8 @@ const actions = {
   "ai-rename": startAiRename,
   "ai-effort-menu": (b) => (el.aiMenu.hidden ? openAiEffortMenu(b) : closeAiEffortMenu()),
   "ai-stop": stopAi,
-  "ai-save-key": saveAiKey,
-  "ai-clear-key": clearAiKey,
+  "ai-add-provider": openProviderDialog,
+  "ai-forget": (b) => changeAiMemory((memory) => { memory.items = memory.items.filter((item) => item.id !== b.dataset.id); }),
   "ai-clear-selection": () => { state.ai.selection = null; updateAiChrome(); el.aiInput.focus(); },
   "ai-clear-reply": () => { state.ai.reply = null; updateAiChrome(); el.aiInput.focus(); },
   "dialog-close": (b) => b.closest("dialog").close(),
@@ -1450,12 +1664,26 @@ async function exportPdf() {
 }
 
 // ---------- command palette ----------
-const PALETTE_GROUPS = ["File", "Editor", "View", "Mark", "Preferences", "Help"];
+const PALETTE_GROUPS = ["File", "Editor", "View", "Mark", "Preferences", "Help", "Headings", "Files"];
+const PALETTE_DYNAMIC_MAX = 8; // rows shown per Headings / Files group
 let paletteMatches = [];
 let paletteSel = 0;
 
-function paletteCommands() {
+function zoom(step) {
+  const i = FONT_SIZES.indexOf(state.settings.fontSize);
+  state.settings.fontSize = step ? FONT_SIZES[Math.max(0, Math.min(FONT_SIZES.length - 1, i + step))] : DEFAULT_SETTINGS.fontSize;
+  applySettings();
+}
+
+/** Commands, plus (only while searching) the open document's headings and every known file. */
+function paletteCommands(q) {
   const hasDoc = !!(state.path || state.untitled);
+  const editing = hasDoc && state.mode !== "read";
+  const found = !q ? [] : [
+    ...(hasDoc ? scanSource(state.text).headings : []).map((h, i) => ({ group: "Headings", icon: "chevron", title: h.text, run: () => gotoHeading(i) })),
+    ...[...new Set([...state.recents, ...folderFiles()])].filter((p) => p !== state.path)
+      .map((p) => ({ group: "Files", icon: "file", title: baseName(p), sub: prettyDir(p), run: () => openFile(p) })),
+  ];
   return [
     { group: "File", icon: "plus", title: "New File", key: "Ctrl N", keywords: "create blank untitled document", run: newFile },
     { group: "File", icon: "window", title: "New Window", key: "Ctrl Shift N", keywords: "another second instance blank", run: newWindow },
@@ -1471,12 +1699,19 @@ function paletteCommands() {
     { group: "Editor", icon: "refresh", title: "Cycle View Mode", key: "Ctrl E", keywords: "switch rotate toggle view", on: hasDoc, run: () => setMode({ read: "split", split: "edit", edit: "read" }[state.mode]) },
     { group: "Editor", icon: "search", title: "Find", key: "Ctrl F", keywords: "search text locate", on: hasDoc, run: () => openFind() },
     { group: "Editor", icon: "replace", title: "Find & Replace", key: "Ctrl H", keywords: "search substitute swap", on: hasDoc, run: () => openFind(undefined, { replace: true }) },
-    { group: "View", icon: "sidebar", title: "Toggle Sidebar", key: "Ctrl B", keywords: "files panel hide show tree", run: toggleSidebar },
+    { group: "Editor", icon: "edit", title: "Bold", key: "Ctrl B", keywords: "strong format selection", on: editing, run: () => wrapSelection("**") },
+    { group: "Editor", icon: "edit", title: "Italic", key: "Ctrl I", keywords: "emphasis format selection", on: editing, run: () => wrapSelection("*") },
+    { group: "Editor", icon: "edit", title: "Insert Link", key: "Ctrl K", keywords: "url hyperlink format selection", on: editing, run: () => wrapSelection("[", "](url)", { toggle: false, select: "url" }) },
+    { group: "View", icon: "sidebar", title: "Toggle Sidebar", key: "Ctrl B", keywords: "files panel hide show tree outline", run: toggleSidebar },
+    { group: "View", icon: "plus", title: "Zoom In", key: "Ctrl +", keywords: "bigger larger font size text", run: () => zoom(1) },
+    { group: "View", icon: "min", title: "Zoom Out", key: "Ctrl -", keywords: "smaller font size text", run: () => zoom(-1) },
+    { group: "View", icon: "refresh", title: "Reset Zoom", key: "Ctrl 0", keywords: "default font size text", run: () => zoom(0) },
     { group: "Mark", icon: "sparkle", title: "Toggle Mark", key: "Ctrl Shift M", keywords: "ai assistant chat sidebar panel", run: toggleAiPanel },
     { group: "Mark", icon: "plus", title: "New Chat with Mark", keywords: "ai assistant conversation clean", run: () => { openAiPanel(); newAiChat(); } },
     { group: "Mark", icon: "clock", title: "Mark Chat History", keywords: "ai assistant saved chats conversations", run: () => openAiHistory() },
     { group: "Preferences", icon: "settings", title: "Settings", key: "Ctrl ,", keywords: "preferences appearance theme themes dark light accent color font fonts typography typeface size reading width interface document editor", run: openSettings },
     { group: "Help", icon: "info", title: "About Markdown", keywords: "version about info credits app", run: openAbout },
+    ...found,
   ];
 }
 
@@ -1497,13 +1732,13 @@ function fuzzyScore(s, q) {
 
 function renderPalette() {
   const q = el.paletteInput.value.trim().toLowerCase();
-  paletteMatches = paletteCommands()
+  paletteMatches = paletteCommands(q)
     .map((c, i) => ({ c, i, s: fuzzyScore(`${c.title} ${c.keywords || ""}`.toLowerCase(), q) }))
     .filter((x) => x.s >= 0)
     .sort((a, b) => b.s - a.s || a.i - b.i);
   paletteMatches.forEach((x, mi) => (x.mi = mi));
   const groups = PALETTE_GROUPS
-    .map((g, gi) => ({ g, gi, rows: paletteMatches.filter((x) => x.c.group === g) }))
+    .map((g, gi) => ({ g, gi, rows: paletteMatches.filter((x) => x.c.group === g).slice(0, g === "Headings" || g === "Files" ? PALETTE_DYNAMIC_MAX : undefined) }))
     .filter((x) => x.rows.length);
   // While searching, float the group holding the best match to the top (so Enter runs it);
   // with no query, keep the familiar menu order.
@@ -1512,7 +1747,7 @@ function renderPalette() {
     `<div class="pg-label">${g}</div><div class="pg-box">` + rows.map((x) => {
       const c = x.c;
       return `<button class="palette-row${c.on === false ? " is-disabled" : ""}" data-mi="${x.mi}">
-        ${svg(c.icon)}<span class="pr-title">${escapeHtml(c.title)}</span>${c.key ? `<kbd>${escapeHtml(c.key)}</kbd>` : ""}</button>`;
+        ${svg(c.icon)}<span class="pr-title">${escapeHtml(c.title)}</span>${c.sub ? `<span class="pr-sub">${escapeHtml(c.sub)}</span>` : ""}${c.key ? `<kbd>${escapeHtml(c.key)}</kbd>` : ""}</button>`;
     }).join("") + "</div>").join("") || `<div class="palette-empty">No matching commands</div>`;
   selectPalette(0);
 }
@@ -1600,6 +1835,10 @@ document.addEventListener("keydown", (e) => {
     e: () => state.path && setMode({ read: "split", split: "edit", edit: "read" }[state.mode]),
     b: toggleSidebar,
     ",": actions.settings,
+    "=": () => zoom(1),
+    "+": () => zoom(1),
+    "-": () => zoom(-1),
+    "0": () => zoom(0),
   }[k];
   if (run) { e.preventDefault(); run(); }
 });
@@ -1680,7 +1919,7 @@ function selectionDetail(selection) {
 function updateAiChrome() {
   const chat = state.ai.chat;
   el.aiTitle.textContent = chat?.title || "New chat";
-  el.aiEffortLabel.textContent = aiEffortName(state.settings.aiEffort);
+  updateAiModelLabel();
   const file = currentFileMeta();
   el.aiChipFile.hidden = !file;
   if (file) {
@@ -1750,8 +1989,9 @@ function ensureChat() {
     createdAt: now,
     updatedAt: now,
     file: currentFileMeta(),
-    model: AI_MODEL,
-    effort: state.settings.aiEffort,
+    provider: aiCurrent()?.provider.id || "",
+    model: aiCurrent()?.model.id || "",
+    effort: aiEffort(),
     messages: [],
   };
   return state.ai.chat;
@@ -1768,17 +2008,30 @@ async function saveAiChat() {
   }
 }
 
-function documentBlock() {
+function aiDocument() {
   const file = currentFileMeta();
-  if (!file) return "No document is currently open. Answer from the conversation alone.";
-  const text = state.text || "";
-  const truncated = text.length > AI_MAX_DOC;
-  const dirty = state.path ? state.text !== state.saved : state.untitled;
-  return `Name: ${file.name}\nPath: ${file.path || "(unsaved buffer)"}${dirty ? " (unsaved edits)" : ""}\n\n<document>\n${truncated ? text.slice(0, AI_MAX_DOC) : text}\n</document>${truncated ? `\n\n[The document was truncated to its first ${AI_MAX_DOC} characters.]` : ""}`;
+  if (!file) return null;
+  return { name: file.name, path: file.path, text: state.text || "", dirty: state.path ? state.text !== state.saved : state.untitled };
 }
 
-function systemPrompt() {
-  return `You are Mark, the built-in AI assistant in the Markdown desktop app. Help the user read, understand, and edit the document they have open. Reply in GitHub-flavored Markdown. Use fenced code blocks with language tags. Be concise and reference the document when useful.\n\n## Current document\n${documentBlock()}`;
+const aiMemoryOn = () => state.settings.aiMemory !== "off";
+const aiDocIsLarge = (doc) => Boolean(doc && doc.text.length > MARK_LIMITS.fullDoc);
+const relPath = (path) => (state.folder && path.startsWith(state.folder) ? path.slice(state.folder.length).replace(/^[\\/]/, "") : path);
+
+// Parts are ordered from rarely to often changing; see markctx.js.
+function systemPrompt(chat) {
+  const files = folderFiles().length;
+  return [
+    MARK_RULES,
+    memoryContext(state.ai.memory, aiMemoryOn()),
+    `## Session\nDate: ${localDate()}${files ? `\nOpen folder: ${state.folder} (${files} Markdown files)` : ""}`,
+    documentContext(aiDocument(), scanSource),
+    chat.summary ? `## Earlier in this conversation (summary)\n${chat.summary}` : "",
+  ].filter(Boolean).join("\n\n");
+}
+
+function aiTools() {
+  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFolder: folderFiles().length > 0, memory: aiMemoryOn() });
 }
 
 function apiUserContent(message) {
@@ -1795,9 +2048,10 @@ function apiUserContent(message) {
 }
 
 function buildApiMessages(chat) {
-  const history = chat.messages.filter((message) => !(message.role === "assistant" && !message.content)).slice(-AI_MAX_HISTORY);
+  // Past turns go as plain text: tool results are not replayed, and summarised turns are skipped.
+  const history = chat.messages.slice(chat.summarizedCount || 0).filter((message) => !(message.role === "assistant" && !message.content));
   return [
-    { role: "system", content: systemPrompt() },
+    { role: "system", content: systemPrompt(chat) },
     ...history.map((message) => ({
       role: message.role,
       content: message.role === "user" ? apiUserContent(message) : message.content,
@@ -1806,15 +2060,23 @@ function buildApiMessages(chat) {
 }
 
 function seedActions(chat, effort) {
-  const file = currentFileMeta();
-  const actions = [file
-    ? { kind: "context", id: "context", label: `Read ${file.name}`, detail: `${fmtCount((state.text || "").length)} characters`, status: "done" }
-    : { kind: "context", id: "context", label: "No document open", detail: "Answering without file context", status: "done" }];
+  const doc = aiDocument();
+  const actions = [!doc
+    ? { kind: "context", id: "context", label: "No document open", detail: "Answering without file context", status: "done" }
+    : aiDocIsLarge(doc)
+      ? { kind: "context", id: "context", label: `Outlined ${doc.name}`, detail: `${fmtCount(doc.text.length)} characters · reads parts on demand`, status: "done" }
+      : { kind: "context", id: "context", label: `Read ${doc.name}`, detail: `${fmtCount(doc.text.length)} characters`, status: "done" }];
+  const memory = state.ai.memory;
+  const remembered = aiMemoryOn() ? memory.items.length : 0;
+  if (remembered || memory.profile.trim()) {
+    const detail = [memory.profile.trim() && "your notes", remembered && `${remembered} ${remembered === 1 ? "memory" : "memories"}`].filter(Boolean).join(" · ");
+    actions.push({ kind: "context", id: "memory", label: "Personalized", detail, status: "done" });
+  }
   const lastUser = [...chat.messages].reverse().find((message) => message.role === "user");
   if (lastUser?.selection?.text) {
     actions.push({ kind: "selection", id: "selection", label: "Selection attached", detail: selectionDetail(lastUser.selection), status: "done" });
   }
-  actions.push({ kind: "model", id: "model", label: AI_MODEL_NAME, detail: `effort ${aiEffortName(effort).toLowerCase()}`, status: "running" });
+  actions.push({ kind: "model", id: "model", label: aiModelName(aiCurrent()), detail: effort ? `effort ${aiEffortName(effort).toLowerCase()}` : aiCurrent()?.provider.name || "", status: "running" });
   return actions;
 }
 
@@ -1875,7 +2137,7 @@ function updateAiMeta(node, msg) {
   const parts = [];
   if (msg.timing?.durationMs) parts.push(fmtDuration(msg.timing.durationMs));
   if (msg.usage) parts.push(...usageParts(msg.usage));
-  parts.push(aiEffortName(msg.effort || state.settings.aiEffort).toLowerCase());
+  if (msg.effort) parts.push(aiEffortName(msg.effort).toLowerCase());
   meta.textContent = parts.join(" · ");
   meta.title = msg.usage
     ? `Input ${Number(msg.usage.input || 0).toLocaleString()} · Output ${Number(msg.usage.output || 0).toLocaleString()}${msg.usage.reasoning ? ` · Reasoning ${Number(msg.usage.reasoning).toLocaleString()}` : ""}${msg.usage.cost != null ? ` · Cost ${formatCost(msg.usage.cost)}` : ""}`
@@ -1956,7 +2218,7 @@ function renderAiMessage(msg, index) {
   node.innerHTML = `<header class="ai-msg-head">
       <img class="ai-avatar-sm" src="assets/mark.png" alt="" width="20" height="20" />
       <span class="ai-name">Mark</span>
-      <span class="ai-tag">${AI_MODEL_NAME}</span>
+      <span class="ai-tag">${escapeHtml(msg.modelName || "DeepSeek V4.1 Flash")}</span>
       <span class="ai-tag ai-tag-effort"></span>
       <time class="ai-time"></time>
     </header>
@@ -1972,7 +2234,8 @@ function renderAiMessage(msg, index) {
     <div class="md chat-md"></div>
     <footer class="ai-actions"><button class="ai-act" data-ai-copy>Copy</button><span class="ai-meta"></span></footer>`;
 
-  $(".ai-tag-effort", node).textContent = aiEffortName(msg.effort || state.settings.aiEffort);
+  $(".ai-tag-effort", node).textContent = aiEffortName(msg.effort);
+  $(".ai-tag-effort", node).hidden = !msg.effort;
   const created = msg.createdAt ? new Date(msg.createdAt) : null;
   $(".ai-time", node).textContent = created && !Number.isNaN(created.getTime()) ? created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   for (const action of msg.actions || []) if (action.status === "running") action.status = "done";
@@ -2057,9 +2320,9 @@ function handleAiEvent(event) {
       updateThinking(node, msg, false);
       const details = $(".ai-think", node);
       if (details.open && !details.dataset.userToggled) details.open = false;
-      setAiPhase(node, "Writing…");
       node.classList.add("streaming");
     }
+    setAiPhase(node, "Writing…");
     msg.content = `${msg.content || ""}${event.text || ""}`;
     scheduleChatRender(node, msg);
     scrollAiIfPinned();
@@ -2067,23 +2330,14 @@ function handleAiEvent(event) {
   }
 
   if (event.type === "action") {
-    const id = event.id || event.name || "tool";
-    let action = (msg.actions || []).find((item) => item.id === id);
-    if (!action) {
-      action = { kind: "tool", id, label: event.name || "Tool", detail: "", status: "running" };
-      msg.actions.push(action);
-    }
-    action.label = event.name || action.label;
-    action.detail = event.detail || action.detail;
-    action.status = event.status || "running";
+    aiToolAction(current, event.id, event.name);
     updateTrace(node, msg);
     scrollAiIfPinned();
     return;
   }
 
   if (event.type === "done") {
-    msg.timing = { firstTokenMs: event.first_token_ms || 0, durationMs: event.duration_ms || 0 };
-    msg.usage = { input: event.input_tokens || 0, output: event.output_tokens || 0, reasoning: event.reasoning_tokens || 0, cost: event.cost ?? null };
+    // Usage and timing are summed over the answer's rounds in runAssistantTurn.
     if (!current.contentStarted && current.reasoningStart) msg.reasoningDurationMs = Math.round(performance.now() - current.reasoningStart);
   }
 }
@@ -2101,12 +2355,16 @@ async function sendAiMessage(text) {
     toast("Stop Mark first.", "error");
     return;
   }
+  if (!aiCurrent()) {
+    toast("Choose a model first: Settings → Mark → Add model provider.", "error");
+    return;
+  }
   if (!state.ai.open) openAiPanel({ focus: false });
   const chat = ensureChat();
   const selection = state.ai.selection;
   const reply = state.ai.reply;
   chat.file = currentFileMeta();
-  chat.effort = state.settings.aiEffort;
+  chat.effort = aiEffort();
   chat.messages.push({ role: "user", content: value, selection: selection || null, reply: reply || null, createdAt: new Date().toISOString() });
   state.ai.selection = null;
   state.ai.reply = null;
@@ -2124,7 +2382,14 @@ async function sendAiMessage(text) {
 async function requestAssistant() {
   const chat = state.ai.chat;
   if (!chat || !chat.messages.length || state.ai.streaming) return;
-  const effort = (chat.effort = state.settings.aiEffort);
+  const target = aiCurrent();
+  if (!target) {
+    toast("Choose a model first: Settings → Mark → Add model provider.", "error");
+    return;
+  }
+  chat.provider = target.provider.id;
+  chat.model = target.model.id;
+  const effort = (chat.effort = aiEffort(target));
   chat.file = currentFileMeta();
   const assistant = {
     role: "assistant",
@@ -2136,6 +2401,7 @@ async function requestAssistant() {
     timing: null,
     stopped: false,
     effort,
+    modelName: aiModelName(target),
     createdAt: new Date().toISOString(),
   };
   chat.messages.push(assistant);
@@ -2146,7 +2412,6 @@ async function requestAssistant() {
   if (think) delete think.dataset.userToggled;
   state.ai.current = { msg: assistant, node, index, reasoningStart: 0, contentStarted: false };
   state.ai.streaming = true;
-  state.ai.requestId = (crypto.randomUUID && crypto.randomUUID()) || `${nanoid8()}${nanoid8()}`;
   setAiPhase(node, "Reading document…");
   setAiStreaming(true);
   scrollAiIfPinned(true);
@@ -2154,14 +2419,7 @@ async function requestAssistant() {
   const channel = new Channel();
   channel.onmessage = handleAiEvent;
   try {
-    const reply = await invoke("ai_chat", {
-      requestId: state.ai.requestId,
-      model: AI_MODEL,
-      effort,
-      messages: buildApiMessages(chat),
-      onEvent: channel,
-    });
-    await finalizeAssistant(reply);
+    await finalizeAssistant(await runAssistantTurn(chat, effort, channel));
   } catch (err) {
     failAssistant(String(err));
   } finally {
@@ -2171,6 +2429,209 @@ async function requestAssistant() {
     state.ai.current?.node.classList.remove("streaming");
   }
 }
+
+/** The trace entry for one tool call; ids are scoped by round because fallback ids repeat. */
+function aiToolAction(current, id, name) {
+  const key = `${current.round || 1}:${id || name}`;
+  let action = current.msg.actions.find((item) => item.id === key);
+  if (!action) {
+    action = { kind: "tool", id: key, label: AI_TOOL_LABELS[name] || name || "Tool", detail: "", status: "running" };
+    current.msg.actions.push(action);
+  }
+  return action;
+}
+
+/** Folds old turns into `chat.summary` once the history outgrows its budget. */
+async function compactAiHistory(chat, current) {
+  const sent = chat.messages.slice(0, -1); // without the pending reply
+  const from = Math.min(chat.summarizedCount || 0, sent.length);
+  const start = historyStart(sent, from);
+  if (start <= from) return;
+  setAiPhase(current.node, "Summarizing earlier messages…");
+  const transcript = sent.slice(from, start).filter((message) => message.content)
+    .map((message) => `${message.role === "user" ? "User" : "Mark"}: ${message.content.slice(0, 3000)}`).join("\n\n");
+  const action = { kind: "context", id: "summary", label: "Summarized earlier messages", detail: `${start - from} messages`, status: "done" };
+  try {
+    chat.summary = await invoke("ai_complete", {
+      provider: chat.provider,
+      model: chat.model,
+      maxTokens: 800,
+      messages: [
+        { role: "system", content: "You compress a conversation between a user and Mark, a Markdown document assistant, so it can continue without the original messages. Keep what the user is trying to do, decisions and conclusions reached, facts and names later turns may rely on, and any open question. Drop pleasantries and exact wording. Write terse bullet points, at most 250 words." },
+        { role: "user", content: `${chat.summary ? `Summary so far:\n${chat.summary}\n\n` : ""}Messages to fold in:\n${transcript}\n\nUpdated summary:` },
+      ],
+    });
+  } catch {
+    action.label = "Dropped earlier messages"; // the request must still fit; the old summary, if any, stays
+  }
+  chat.summarizedCount = start;
+  current.msg.actions.splice(-1, 0, action); // before the model entry
+  updateTrace(current.node, current.msg);
+}
+
+/** One answer: model rounds with tool calls in between. Tool results live only inside this turn. */
+async function runAssistantTurn(chat, effort, channel) {
+  const current = state.ai.current;
+  await compactAiHistory(chat, current);
+  const messages = buildApiMessages(chat);
+  const tools = aiTools();
+  const started = performance.now();
+  const usage = { input: 0, output: 0, reasoning: 0, cost: null };
+  const content = [];
+  const reasoning = [];
+  let firstTokenMs = 0;
+  for (let round = 1; ; round++) {
+    current.round = round;
+    state.ai.requestId = (crypto.randomUUID && crypto.randomUUID()) || `${nanoid8()}${nanoid8()}`;
+    const reply = await invoke("ai_chat", {
+      requestId: state.ai.requestId,
+      provider: chat.provider,
+      model: chat.model,
+      effort,
+      messages,
+      tools,
+      toolChoice: round < MARK_LIMITS.toolRounds ? "auto" : "none", // the last round has to answer
+      onEvent: channel,
+    });
+    usage.input += reply.usage?.input || 0;
+    usage.output += reply.usage?.output || 0;
+    usage.reasoning += reply.usage?.reasoning || 0;
+    if (reply.usage?.cost != null) usage.cost = (usage.cost || 0) + reply.usage.cost;
+    firstTokenMs ||= reply.timing?.firstTokenMs || 0;
+    if (reply.content) content.push(reply.content);
+    if (reply.reasoning) reasoning.push(reply.reasoning);
+    const calls = reply.stopped ? [] : reply.toolCalls || [];
+    if (!calls.length) {
+      return {
+        content: content.join("\n\n"),
+        reasoning: reasoning.join("\n\n").slice(0, AI_MAX_REASONING),
+        stopped: reply.stopped,
+        usage,
+        timing: { firstTokenMs, durationMs: Math.round(performance.now() - started) },
+      };
+    }
+    messages.push({
+      role: "assistant",
+      content: reply.content || "",
+      ...(reply.reasoning ? { reasoning_content: reply.reasoning } : {}),
+      ...(reply.providerBlocks ? { provider_blocks: reply.providerBlocks } : {}), // handed back unchanged; see anthropic.rs
+      tool_calls: calls.map((call) => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })),
+    });
+    for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, content: await runAiToolCall(current, call) });
+    // Later rounds stream onto the same message; keep what is shown equal to what will be saved.
+    current.msg.content = content.length ? `${content.join("\n\n")}\n\n` : "";
+    current.msg.reasoning = reasoning.length ? `${reasoning.join("\n\n")}\n\n` : "";
+    setAiPhase(current.node, "Thinking…");
+  }
+}
+
+async function runAiToolCall(current, call) {
+  const action = aiToolAction(current, call.id, call.name);
+  let result;
+  try {
+    let args = {};
+    try { args = JSON.parse(call.arguments || "{}") || {}; } catch { throw new Error("The arguments were not valid JSON."); }
+    const out = await runAiTool(call.name, args);
+    result = out.result;
+    action.detail = out.detail;
+    action.status = "done";
+  } catch (err) {
+    result = `Error: ${err?.message || err}`;
+    action.detail = String(err?.message || err);
+    action.status = "error";
+  }
+  updateTrace(current.node, current.msg);
+  scrollAiIfPinned();
+  return result;
+}
+
+/** Runs one tool for the model. Files are limited to the Markdown files of the open folder. */
+async function runAiTool(name, args) {
+  const text = state.text || "";
+  const query = String(args.query || "").trim();
+  const count = (n, word) => `${n} ${word}${n === 1 ? "" : word.endsWith("ch") ? "es" : "s"}`;
+  switch (name) {
+    case "read_document": {
+      if (!currentFileMeta()) throw new Error("No document is open.");
+      const out = numberedLines(text, args.start_line, args.end_line);
+      return { result: out.text, detail: `Lines ${out.from}–${out.to}` };
+    }
+    case "search_document": {
+      if (!query) throw new Error("query is empty.");
+      const { hits, total } = searchLines(text, query);
+      const head = `${count(total, "matching line")}${total > hits.length ? ` (first ${hits.length} shown)` : ""}:`;
+      return { result: total ? `${head}\n${hits.map((hit) => `${hit.line}: ${hit.text}`).join("\n")}` : "No matches.", detail: `“${query}” · ${count(total, "match")}` };
+    }
+    case "list_files": {
+      const files = folderFiles().map(relPath);
+      const shown = files.slice(0, 400);
+      return { result: `${shown.join("\n") || "The open folder has no Markdown files."}${files.length > shown.length ? `\n[${files.length - shown.length} more not listed; use search_files.]` : ""}`, detail: count(files.length, "file") };
+    }
+    case "search_files": {
+      if (!query) throw new Error("query is empty.");
+      const hits = await invoke("search_files", { paths: folderFiles(), query });
+      const shown = hits.slice(0, 60);
+      return { result: shown.length ? shown.map((hit) => `${relPath(hit.path)}:${hit.line}: ${hit.text}`).join("\n") : "No matches.", detail: `“${query}” · ${count(hits.length, "match")}` };
+    }
+    case "read_file": {
+      const want = String(args.path || "").trim().replace(/^\.[\\/]/, "");
+      const path = folderFiles().find((file) => file === want || relPath(file) === want);
+      if (!path) throw new Error("No such Markdown file in the open folder. Call list_files for valid paths.");
+      const out = numberedLines(path === state.path ? text : await invoke("read_file", { path }), args.start_line, args.end_line);
+      return { result: `${relPath(path)}\n${out.text}`, detail: `${relPath(path)} · lines ${out.from}–${out.to}` };
+    }
+    case "remember": {
+      if (!aiMemoryOn()) throw new Error("Memory is turned off.");
+      const item = await changeAiMemory((memory) => rememberFact(memory, args.text));
+      if (!item) throw new Error("text is empty.");
+      toast(`Mark will remember: ${item.text}`);
+      return { result: `Saved as [${item.id}].`, detail: item.text };
+    }
+    case "forget": {
+      if (!aiMemoryOn()) throw new Error("Memory is turned off.");
+      const gone = await changeAiMemory((memory) => {
+        const at = memory.items.findIndex((item) => item.id === String(args.id || "").replace(/[[\]]/g, ""));
+        return at === -1 ? null : memory.items.splice(at, 1)[0];
+      });
+      if (!gone) throw new Error("No memory has that id.");
+      return { result: "Deleted.", detail: gone.text };
+    }
+    default:
+      throw new Error(`Unknown tool "${name}".`);
+  }
+}
+
+async function loadAiMemory() {
+  try {
+    state.ai.memory = normalizeMemory(JSON.parse(await invoke("memory_load")));
+  } catch { /* keep what is in memory */ }
+}
+
+/** Reload (another window may have written), change, write back. Returns what `change` returns. */
+async function changeAiMemory(change) {
+  await loadAiMemory();
+  const out = change(state.ai.memory);
+  try {
+    await invoke("memory_save", { json: JSON.stringify({ version: 1, ...state.ai.memory }) });
+  } catch (err) {
+    toast(`Couldn't save Mark's memory. ${err}`, "error");
+    throw err;
+  }
+  renderAiMemory();
+  return out;
+}
+
+function renderAiMemory() {
+  const items = state.ai.memory.items;
+  el.aiMemoryList.innerHTML = items.length
+    ? items.map((item) => `<li><span>${escapeHtml(item.text)}</span><button class="icon-btn sm" data-action="ai-forget" data-id="${escapeHtml(item.id)}" data-tip="Forget" aria-label="Forget this memory">${svg("trash")}</button></li>`).join("")
+    : `<li class="ai-memory-empty">Nothing saved yet. Tell Mark about yourself or how you like answers, and it will remember.</li>`;
+}
+
+el.aiProfile.addEventListener("input", debounce(() => {
+  const profile = el.aiProfile.value.slice(0, MARK_LIMITS.profile);
+  changeAiMemory((memory) => { memory.profile = profile; }).catch(() => {});
+}, 500));
 
 async function finalizeAssistant(reply) {
   const current = state.ai.current;
@@ -2261,8 +2722,10 @@ async function maybeGenerateTitle() {
   if (!isDefault) return;
   state.ai.titleBusy = true;
   try {
-    const title = await invoke("ai_title", {
-      model: AI_MODEL,
+    const title = await invoke("ai_complete", {
+      provider: chat.provider,
+      model: chat.model,
+      maxTokens: 100,
       messages: [
         { role: "system", content: "You name chat conversations. Reply with a short title of 2 to 5 words. No quotes, no markdown, no punctuation at the end." },
         { role: "user", content: `Document: ${chat.file?.name || "none"}\nQuestion: ${firstUser.content.slice(0, 2000)}\nAnswer: ${firstAssistant.content.slice(0, 2000)}\n\nTitle:` },
@@ -2471,9 +2934,72 @@ function updateAiToggle() {
   el.win.dataset.ai = state.ai.open ? "open" : "closed";
 }
 
+// ---------- Mark: model providers ----------
+const aiProviderById = (id) => state.ai.providers.find((provider) => provider.id === id);
+const aiUsable = (provider) => (provider.hasKey || provider.noKey) && provider.models.length > 0;
+const aiModelName = (target) => (target ? target.model.name || target.model.id : "Select model");
+
+/** The provider + model in use: the open chat's own, else the default for new chats. */
+function aiCurrent() {
+  const chat = state.ai.chat;
+  // Chats from before providers existed all used the Command Code gateway.
+  const picks = [[chat?.provider || (chat?.model ? "commandcode" : ""), chat?.model], [state.settings.aiProvider, state.settings.aiModel]];
+  for (const [providerId, modelId] of picks) {
+    const provider = aiProviderById(providerId);
+    const model = provider?.models.find((item) => item.id === modelId);
+    if (model && aiUsable(provider)) return { provider, model };
+  }
+  return null;
+}
+
+function aiEfforts(target) {
+  const levels = Object.keys((target && (target.model.reasoningEfforts || target.provider.reasoningEfforts)) || {});
+  const rank = (level) => (AI_EFFORT_ORDER.indexOf(level) + 1 || 99);
+  return levels.sort((a, b) => rank(a) - rank(b));
+}
+
+/** The effort to send: the user's last choice when this model offers it, else the provider's default. */
+function aiEffort(target = aiCurrent()) {
+  const levels = aiEfforts(target);
+  if (!levels.length) return ""; // this model has no Effort menu
+  return [state.settings.aiEffort, target.provider.reasoning].find((level) => levels.includes(level)) || levels[0];
+}
+
+function updateAiModelLabel() {
+  const target = aiCurrent();
+  const effort = aiEffort(target);
+  el.aiModelName.textContent = aiModelName(target);
+  el.aiEffortLabel.textContent = aiEffortName(effort);
+  el.aiEffortLabel.hidden = !effort;
+}
+
+async function loadAiProviders() {
+  try {
+    state.ai.providers = await invoke("providers_list");
+  } catch (err) {
+    toast(`Couldn't load model providers. ${err}`, "error");
+  }
+  // First usable model becomes the default so a fresh setup can chat right away.
+  if (!aiProviderById(state.settings.aiProvider)?.models.some((model) => model.id === state.settings.aiModel)) {
+    const provider = state.ai.providers.find(aiUsable);
+    if (provider) Object.assign(state.settings, { aiProvider: provider.id, aiModel: provider.models[0].id });
+  }
+  renderAiProviders();
+  applySettings();
+}
+
+function setAiModel(providerId, modelId) {
+  const provider = aiProviderById(providerId);
+  if (!provider?.models.some((model) => model.id === modelId)) return;
+  Object.assign(state.settings, { aiProvider: providerId, aiModel: modelId });
+  const chat = state.ai.chat;
+  if (chat) Object.assign(chat, { provider: providerId, model: modelId });
+  setAiEffort(aiEffort()); // keeps the effort valid for the new model, saves and repaints
+}
+
 function setAiEffort(value) {
-  if (!AI_EFFORTS.some(([effort]) => effort === value)) return;
-  state.settings.aiEffort = value;
+  if (value && !aiEfforts(aiCurrent()).includes(value)) return;
+  if (value) state.settings.aiEffort = value;
   const chat = state.ai.chat;
   if (chat) {
     chat.effort = value;
@@ -2485,11 +3011,24 @@ function setAiEffort(value) {
 }
 
 function openAiEffortMenu(anchor) {
-  const current = state.settings.aiEffort;
-  const hints = { off: "Fastest", low: "Balanced", high: "Deeper", max: "Deepest" };
-  el.aiMenu.innerHTML = `<div class="ai-menu-model"><b>${AI_MODEL_NAME}</b><span>${AI_MODEL}</span></div>
-    <div class="ai-menu-label">Reasoning effort</div>` + AI_EFFORTS.map(([value, label]) =>
-      `<button role="menuitemradio" data-effort="${value}" aria-checked="${value === current}">${svg("check")}<span>${label}</span><span class="ai-menu-desc">${hints[value]}</span></button>`).join("");
+  const target = aiCurrent();
+  const effort = aiEffort(target);
+  const providers = state.ai.providers.filter(aiUsable);
+  const count = providers.reduce((n, provider) => n + provider.models.length, 0);
+  let html = "";
+  if (aiEfforts(target).length) {
+    html += `<div class="ai-menu-label">Reasoning effort</div>` + aiEfforts(target).map((level) =>
+      `<button role="menuitemradio" data-effort="${escapeHtml(level)}" aria-checked="${level === effort}">${svg("check")}<span>${escapeHtml(aiEffortName(level))}</span><span class="ai-menu-desc">${AI_EFFORT_INFO[level]?.[1] || ""}</span></button>`).join("");
+  }
+  if (count > 10) html += `<input class="ai-menu-filter" type="text" placeholder="Search models" spellcheck="false" aria-label="Search models" />`;
+  for (const provider of providers) {
+    html += `<div class="ai-menu-label" data-group="${escapeHtml(provider.id)}">${escapeHtml(provider.name || provider.id)}</div>` + provider.models.map((model) =>
+      `<button role="menuitemradio" data-provider="${escapeHtml(provider.id)}" data-model="${escapeHtml(model.id)}" title="${escapeHtml(model.id)}"
+        aria-checked="${target?.provider.id === provider.id && target.model.id === model.id}">${svg("check")}<span>${escapeHtml(model.name || model.id)}</span></button>`).join("");
+  }
+  if (!providers.length) html += `<div class="ai-menu-label">No models yet</div>`;
+  html += `<button data-ai-action="settings">${svg("settings")}<span>Manage model providers…</span></button>`;
+  el.aiMenu.innerHTML = html;
   el.aiMenu.hidden = false;
   anchor.setAttribute("aria-expanded", "true");
   const rect = anchor.getBoundingClientRect();
@@ -2497,7 +3036,7 @@ function openAiEffortMenu(anchor) {
   const left = Math.min(innerWidth - menuRect.width - 8, Math.max(8, rect.right - menuRect.width));
   const top = rect.bottom + 6 + menuRect.height < innerHeight ? rect.bottom + 6 : Math.max(8, rect.top - menuRect.height - 6);
   Object.assign(el.aiMenu.style, { left: `${left}px`, top: `${top}px` });
-  el.aiMenu.querySelector('[aria-checked="true"]')?.focus();
+  (el.aiMenu.querySelector(".ai-menu-filter") || el.aiMenu.querySelector('[aria-checked="true"]'))?.focus();
 }
 
 function closeAiEffortMenu() {
@@ -2505,45 +3044,144 @@ function closeAiEffortMenu() {
   $('[data-action="ai-effort-menu"]')?.setAttribute("aria-expanded", "false");
 }
 
-async function refreshAiStatus() {
+function aiKeyStatus(provider) {
+  const models = provider.models.length ? `${provider.models.length} ${provider.models.length === 1 ? "model" : "models"}` : "no models yet — fetch them";
+  if (provider.noKey) return `No key needed · ${models}`;
+  const preview = provider.keyPreview ? ` ${provider.keyPreview}` : "";
+  const where = {
+    environment: `Key from $${provider.apiKeyEnv}`,
+    keychain: `Key${preview} in your system keychain`,
+    file: `Key${preview} in a private file (no system keychain answered)`,
+    ".env": "Key from the project's .env",
+  }[provider.keySource];
+  return where ? `${where} · ${models}` : "No key yet — add one to use this provider.";
+}
+
+function renderAiProviders() {
+  const shown = state.ai.providers.filter((provider) => provider.hasKey || !provider.builtin || (provider.noKey && provider.models.length));
+  el.aiProviders.innerHTML = shown.map((provider) => {
+    const name = escapeHtml(provider.name || provider.id);
+    return `<div class="ai-prov" data-provider="${escapeHtml(provider.id)}">
+      <div class="ai-prov-head"><b>${name}</b><span class="ai-model-id">${escapeHtml(provider.id)}</span><span class="st-spacer"></span>
+        <button class="btn btn-ghost" data-prov-act="fetch">Fetch available models</button>
+        <button class="btn btn-ghost" data-prov-act="remove">Remove</button></div>
+      <div class="row-desc ai-key-status ${aiUsable(provider) ? "ok" : "warn"}">${escapeHtml(aiKeyStatus(provider))}</div>
+      ${provider.noKey ? "" : `<div class="ai-key-box"><label class="search-field ai-key-field"><input type="password" placeholder="${provider.hasKey ? "Replace API key" : "Paste API key"}" autocomplete="off" spellcheck="false" aria-label="${name} API key" /></label>
+        <button class="btn" data-prov-act="key">Save</button></div>`}
+    </div>`;
+  }).join("") || `<p class="row-desc ai-prov-empty">No provider yet. Add one to start chatting with Mark.</p>`;
+}
+
+async function fetchAiModels(id, { quiet = false } = {}) {
   try {
-    const status = await invoke("ai_status");
-    state.ai.hasKey = status.hasKey;
-    el.aiKeyStatus.classList.toggle("ok", Boolean(status.hasKey));
-    el.aiKeyStatus.classList.toggle("warn", !status.hasKey);
-    el.aiKeyStatus.textContent = status.hasKey
-      ? status.source === "config" ? "Saved in this app." : status.source === "environment" ? "Loaded from the environment." : "Loaded from .env."
-      : "No key yet — add one to start chatting.";
-  } catch {
-    el.aiKeyStatus.textContent = "Couldn't check the key.";
+    const provider = await invoke("provider_fetch_models", { id });
+    if (!quiet) toast(`${provider.models.length} models from ${provider.name || provider.id}.`);
+    return true;
+  } catch (err) {
+    toast(String(err), "error");
+    return false;
   }
 }
 
-async function saveAiKey() {
-  const key = el.aiKeyInput.value.trim();
-  if (!key) {
-    el.aiKeyInput.focus();
+async function aiProviderAction(id, act, row) {
+  const provider = aiProviderById(id);
+  if (!provider) return;
+  try {
+    if (act === "fetch") await fetchAiModels(id);
+    if (act === "remove") {
+      await invoke("provider_delete", { id });
+      toast(`${provider.name || id} removed, together with its saved key.`);
+    }
+    if (act === "key") {
+      const input = $("input", row);
+      const key = input.value.trim();
+      if (!key) { input.focus(); return; }
+      await invoke("provider_set_key", { id, key });
+      toast("API key saved.");
+      if (!provider.models.length) await fetchAiModels(id, { quiet: true });
+    }
+  } catch (err) {
+    toast(String(err), "error");
+  }
+  await loadAiProviders();
+}
+
+el.aiProviders.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-prov-act]");
+  if (button) aiProviderAction(button.closest(".ai-prov").dataset.provider, button.dataset.provAct, button.closest(".ai-prov"));
+});
+el.aiProviders.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing || e.target.tagName !== "INPUT") return;
+  e.preventDefault();
+  aiProviderAction(e.target.closest(".ai-prov").dataset.provider, "key", e.target.closest(".ai-prov"));
+});
+
+// "Add model provider": a shipped provider needs only a key; anything else is a custom API.
+const prov = { tab: "builtin", builtin: "", api: "openai-completions" };
+
+function paintProviderDialog() {
+  for (const button of $$("[data-prov-tab]", el.provDlg)) button.setAttribute("aria-checked", String(button.dataset.provTab === prov.tab));
+  for (const pane of $$("[data-prov-pane]", el.provDlg)) pane.hidden = pane.dataset.provPane !== prov.tab;
+  for (const button of $$("[data-prov-builtin]", el.provDlg)) button.setAttribute("aria-checked", String(button.dataset.provBuiltin === prov.builtin));
+  for (const button of $$("[data-prov-api]", el.provDlg)) button.setAttribute("aria-checked", String(button.dataset.provApi === prov.api));
+  const provider = aiProviderById(prov.builtin);
+  $(".prov-builtin-key", el.provDlg).hidden = !provider || provider.noKey;
+  $(".prov-note", el.provDlg).textContent = !provider ? "Every shipped provider is already set up."
+    : provider.noKey ? `Uses the server at ${provider.baseURL}. Start it first; its installed models are listed automatically.`
+      : `Requests go to ${provider.baseURL}. The key is stored in your system keychain.`;
+}
+
+function openProviderDialog() {
+  const builtins = state.ai.providers.filter((provider) => provider.builtin);
+  $(".prov-builtins", el.provDlg).innerHTML = builtins.map((provider) =>
+    `<button role="radio" data-prov-builtin="${escapeHtml(provider.id)}">${escapeHtml(provider.name || provider.id)}</button>`).join("");
+  Object.assign(prov, { tab: "builtin", builtin: (builtins.find((provider) => !aiUsable(provider)) || builtins[0])?.id || "", api: "openai-completions" });
+  for (const input of $$("input, textarea", el.provDlg)) input.value = "";
+  paintProviderDialog();
+  el.provDlg.returnValue = "cancel";
+  el.provDlg.showModal();
+}
+
+async function addProvider() {
+  let id = prov.builtin;
+  let key = $(".prov-key", el.provDlg).value.trim();
+  if (prov.tab === "custom") {
+    id = $(".prov-id", el.provDlg).value.trim();
+    key = $(".prov-custom-key", el.provDlg).value.trim();
+    const models = $(".prov-models", el.provDlg).value.split(/[\n,]/).map((line) => line.trim()).filter(Boolean).map((model) => ({ id: model }));
+    if (aiProviderById(id)) throw new Error(`“${id}” already exists. Pick another Provider ID.`);
+    await invoke("provider_save", { provider: { id, name: id, api: prov.api, baseURL: $(".prov-url", el.provDlg).value.trim(), noKey: !key, models } });
+  } else if (!id) {
+    throw new Error("Pick a provider.");
+  } else if (!key && !aiProviderById(id).noKey && !aiProviderById(id).hasKey) {
+    throw new Error("Paste an API key.");
+  }
+  if (key) await invoke("provider_set_key", { id, key });
+  await loadAiProviders();
+  if (!aiProviderById(id)?.models.length || prov.tab === "builtin") await fetchAiModels(id);
+  await loadAiProviders();
+}
+
+el.provDlg.addEventListener("click", async (e) => {
+  const pick = e.target.closest("[data-prov-tab], [data-prov-builtin], [data-prov-api]");
+  if (pick) {
+    Object.assign(prov, { tab: pick.dataset.provTab || prov.tab, builtin: pick.dataset.provBuiltin || prov.builtin, api: pick.dataset.provApi || prov.api });
+    paintProviderDialog();
     return;
   }
+  const button = e.target.closest("button[value]");
+  if (!button) return;
+  if (button.value !== "add") { el.provDlg.close("cancel"); return; }
+  button.disabled = true;
   try {
-    await invoke("ai_set_key", { key });
-    el.aiKeyInput.value = "";
-    toast("API key saved.");
-    refreshAiStatus();
+    await addProvider();
+    el.provDlg.close("add");
   } catch (err) {
-    toast(`Couldn't save the key. ${err}`, "error");
+    toast(String(err?.message || err), "error");
+  } finally {
+    button.disabled = false;
   }
-}
-
-async function clearAiKey() {
-  try {
-    await invoke("ai_set_key", { key: null });
-    toast("Saved API key removed.");
-    refreshAiStatus();
-  } catch (err) {
-    toast(`Couldn't remove the key. ${err}`, "error");
-  }
-}
+});
 
 function hideSelChip() {
   el.aiSelChip.hidden = true;
@@ -2740,22 +3378,24 @@ el.aiHistoryList.addEventListener("keydown", (e) => {
 });
 
 el.aiMenu.addEventListener("click", (e) => {
-  const button = e.target.closest("[data-effort]");
+  const button = e.target.closest("[data-effort], [data-model], [data-ai-action]");
   if (!button) return;
-  setAiEffort(button.dataset.effort);
+  if (button.dataset.effort) setAiEffort(button.dataset.effort);
+  else if (button.dataset.model) setAiModel(button.dataset.provider, button.dataset.model);
+  else openSettings();
   closeAiEffortMenu();
+});
+el.aiMenu.addEventListener("input", (e) => {
+  if (!e.target.classList.contains("ai-menu-filter")) return;
+  const query = e.target.value.trim().toLowerCase();
+  for (const button of $$("[data-model]", el.aiMenu)) button.hidden = !`${button.textContent} ${button.dataset.model}`.toLowerCase().includes(query);
+  for (const label of $$("[data-group]", el.aiMenu)) label.hidden = !$(`[data-provider="${CSS.escape(label.dataset.group)}"]:not([hidden])`, el.aiMenu);
 });
 document.addEventListener("mousedown", (e) => {
   if (el.aiMenu.hidden) return;
   if (!e.target.closest(".ai-menu") && !e.target.closest('[data-action="ai-effort-menu"]')) closeAiEffortMenu();
 });
 
-el.aiKeyInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.isComposing) {
-    e.preventDefault();
-    saveAiKey();
-  }
-});
 
 el.aiSelChip.addEventListener("click", () => {
   if (state.ai.chip?.kind === "reply") replyMarkFromChip();
@@ -2834,6 +3474,43 @@ webview.onDragDropEvent((e) => {
   }
 });
 
+// Other tools (git, another editor, an AI agent) change files while this window sits in the background:
+// on return, show what is on disk. Unsaved edits are never replaced, only flagged.
+let diskWarned = null; // disk content already warned about, so refocusing doesn't repeat the toast
+async function checkDisk() {
+  const p = state.path;
+  if (!p) return;
+  let text;
+  try { text = await invoke("read_file", { path: p }); } catch { return; } // deleted or unreadable: keep the buffer
+  if (p !== state.path || text === state.saved) return;
+  if (text === state.text) { state.saved = text; return updateChrome(); } // e.g. our own save still in flight
+  if (isDirty()) {
+    if (diskWarned !== text) toast(`“${baseName(p)}” changed on disk. Saving will overwrite those changes.`, "error");
+    diskWarned = text;
+    return;
+  }
+  const tops = [el.editor.scrollTop, el.previewPane.scrollTop];
+  Object.assign(state, { saved: text, text });
+  el.editor.value = text;
+  resetHistory();
+  await renderPreview();
+  [el.editor.scrollTop, el.previewPane.scrollTop] = tops;
+  updateChrome();
+  renderSidebar();
+  if (!el.findbar.hidden) runFind(el.findInput.value, { keepIndex: true, scroll: false });
+}
+
+addEventListener("focus", () => {
+  checkDisk();
+  if (!state.folder) return;
+  const dir = state.folder;
+  invoke("list_markdown", { dir }).then((tree) => {
+    if (dir !== state.folder || JSON.stringify(tree) === JSON.stringify(state.tree)) return;
+    state.tree = tree;
+    renderSidebar();
+  }, () => { /* folder gone: keep the last listing */ });
+});
+
 // ---------- boot ----------
 (async function boot() {
   applySettings();
@@ -2848,6 +3525,8 @@ webview.onDragDropEvent((e) => {
   const aiW = store.get("aiW", null);
   if (aiW) el.root.style.setProperty("--ai-w", aiW);
   if (store.get("aiOpen", false)) openAiPanel({ focus: false });
+  loadAiProviders();
+  loadAiMemory();
   if (state.folder) loadTree().catch(() => setFolder(null));
   // Path shortening (~) is cosmetic: apply it when it arrives instead of waiting on it.
   tpath.homeDir().then((home) => {
@@ -2857,8 +3536,9 @@ webview.onDragDropEvent((e) => {
     renderWelcome();
     if (state.path) updateChrome();
   }, () => { /* fall back to full paths */ });
-  const initial = fresh ? null : (await initialReq) || store.get("lastFile", null);
+  const initial = fresh ? null : (await initialReq) || (state.settings.startup === "last" ? store.get("lastFile", null) : null);
   // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
+  if (!fresh && (await restoreDraft())) return;
   if (!initial || !(await openFile(initial, { quiet: true }))) {
     renderWelcome();
     el.welcome.hidden = false;

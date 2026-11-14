@@ -3,9 +3,11 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Markdown</title>
+  <title>MarkdownEditor</title>
   <link rel="stylesheet" href="styles.css" />
   <script src="theme.js"></script>
+  <script src="mdsource.js" defer></script>
+  <script src="markctx.js" defer></script>
   <script src="main.js" defer></script>
 </head>
 <body>
@@ -57,7 +59,7 @@
         <button class="icon-btn" data-action="toggle-sidebar" data-tip="Toggle sidebar" data-key="Ctrl B" aria-label="Toggle sidebar"><svg><use href="#i-sidebar"/></svg></button>
       </div>
       <div class="doc-title" data-tauri-drag-region>
-        <span class="doc-name" data-tauri-drag-region>Markdown</span>
+        <span class="doc-name" data-tauri-drag-region>MarkdownEditor</span>
         <i class="dirty-dot" hidden title="Unsaved changes"></i>
       </div>
       <div class="tb-group tb-doc" hidden>
@@ -100,7 +102,7 @@
       <main class="content">
         <section class="welcome" hidden>
           <img class="welcome-mark" src="assets/mark.png" alt="" width="92" height="92" />
-          <h1 class="wordmark">Markdown</h1>
+          <h1 class="wordmark">MarkdownEditor</h1>
           <p class="tagline">A calm place to read and write. Open a file, pick a folder, or drop a document anywhere in this window.</p>
           <div class="welcome-actions">
             <button class="btn btn-primary" data-action="new-file"><svg><use href="#i-plus"/></svg>New file <kbd>Ctrl N</kbd></button>
@@ -180,7 +182,7 @@
             <button class="ai-title" data-action="ai-rename" data-tip="Rename chat" aria-label="Rename chat">New chat</button>
             <input class="ai-title-input" placeholder="Chat name" maxlength="120" aria-label="Chat name" hidden />
             <button class="ai-sub" data-action="ai-effort-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Model and reasoning effort">
-              <span class="ai-model-name">DeepSeek V4.1 Flash</span>
+              <span class="ai-model-name">Select model</span>
               <span class="ai-effort-label">High</span>
               <svg><use href="#i-down"/></svg>
             </button>
@@ -245,9 +247,9 @@
     </div>
     <div class="card">
       <div class="row">
-        <div><div class="row-label">Theme</div><div class="row-desc">Follow the system or pick one.</div></div>
+        <div><div class="row-label">Theme</div><div class="row-desc">System switches between Sage and Plum.</div></div>
         <div class="segmented" data-setting="theme">
-          <button data-value="system">System</button><button data-value="light">Light</button><button data-value="dark">Dark</button><button data-value="monokai" data-tip="Monokai Pro Light">Monokai</button><button data-value="vercel" data-tip="Vercel Dark (OLED)">Vercel</button>
+          <button data-value="system" data-tip="Sage or Plum, following the system">System</button><button data-value="sage" data-tip="Pale green page, green ink">Sage</button><button data-value="plum" data-tip="Aubergine night, rose links">Plum</button><button data-value="sepia" data-tip="Tan paper, brown ink">Sepia</button><button data-value="dusk" data-tip="Warm brown-black, cream text">Dusk</button><button data-value="eink" data-tip="Gray e-reader paper">E-ink</button><button data-value="forest" data-tip="Muted green-gray night">Forest</button><button data-value="paper" data-tip="Ivory page, black ink, rust links">Paper</button><button data-value="midnight" data-tip="Blue-black night, ivory text">Midnight</button><button data-value="light">Light</button><button data-value="dark">Dark</button><button data-value="monokai" data-tip="Monokai Pro Light">Monokai</button><button data-value="vercel" data-tip="Vercel Dark (OLED)">Vercel</button>
         </div>
       </div>
       <div class="row">
@@ -258,12 +260,6 @@
         <div class="row-label">Font size</div>
         <div class="segmented" data-setting="fontSize">
           <button data-value="13">Small</button><button data-value="14">Medium</button><button data-value="16">Large</button><button data-value="18">Huge</button>
-        </div>
-      </div>
-      <div class="row">
-        <div><div class="row-label">Reading width</div><div class="row-desc">Width of the document column.</div></div>
-        <div class="segmented" data-setting="width">
-          <button data-value="normal">Normal</button><button data-value="wide">Wide</button>
         </div>
       </div>
       <div class="row">
@@ -279,28 +275,75 @@
         <label class="search-field font-field"><input class="font-input" data-font="fontEditor" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Editor font" /></label>
       </div>
     </div>
+    <div class="card settings-card">
+      <div class="card-heading">Reading</div>
+      <div class="row">
+        <div><div class="row-label">Reading width</div><div class="row-desc">Width of the document column.</div></div>
+        <div class="segmented" data-setting="width">
+          <button data-value="narrow">Narrow</button><button data-value="normal">Normal</button><button data-value="wide">Wide</button><button data-value="full">Full</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Line spacing</div><div class="row-desc">Space between lines of document text.</div></div>
+        <div class="segmented" data-setting="lineHeight">
+          <button data-value="compact">Compact</button><button data-value="normal">Normal</button><button data-value="relaxed">Relaxed</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Text alignment</div><div class="row-desc">Justified text is hyphenated to keep spacing even.</div></div>
+        <div class="segmented" data-setting="align">
+          <button data-value="left">Left</button><button data-value="justify">Justified</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Long code lines</div><div class="row-desc">Scroll sideways or wrap onto the next line.</div></div>
+        <div class="segmented" data-setting="codeWrap">
+          <button data-value="scroll">Scroll</button><button data-value="wrap">Wrap</button>
+        </div>
+      </div>
+    </div>
+    <div class="card settings-card">
+      <div class="card-heading">Editor and files</div>
+      <div class="row">
+        <div><div class="row-label">Tab width</div><div class="row-desc">Width of a tab character in the editor.</div></div>
+        <div class="segmented" data-setting="tabSize">
+          <button data-value="2">2</button><button data-value="4">4</button><button data-value="8">8</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Autosave</div><div class="row-desc">Save shortly after you stop typing. New files still need a first save.</div></div>
+        <div class="segmented" data-setting="autosave">
+          <button data-value="off">Off</button><button data-value="on">On</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">On startup</div><div class="row-desc">What to show when the app opens without a file.</div></div>
+        <div class="segmented" data-setting="startup">
+          <button data-value="last">Last file</button><button data-value="welcome">Welcome</button>
+        </div>
+      </div>
+    </div>
     <div class="card ai-card">
       <div class="card-heading">Mark</div>
       <div class="row">
-        <div><div class="row-label">Command Code API key</div><div class="row-desc ai-key-status">Checking…</div></div>
-        <div class="ai-key-box">
-          <label class="search-field ai-key-field"><input class="ai-key-input" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" aria-label="Command Code API key" /></label>
-          <button class="btn" data-action="ai-save-key">Save</button>
-          <button class="btn btn-ghost" data-action="ai-clear-key">Clear</button>
-        </div>
+        <div><div class="row-label">Models</div><div class="row-desc">The providers Mark can answer through. Keys are stored in your system keychain, never in the app's files.</div></div>
+        <button class="btn" data-action="ai-add-provider">Add model provider</button>
+      </div>
+      <div class="ai-providers" aria-label="Model providers"></div>
+      <div class="row ai-profile-row">
+        <div><div class="row-label"><label for="app-ai-profile">About you</label></div><div class="row-desc">Who you are and how you like answers. Mark reads this in every chat.</div></div>
+        <textarea class="ai-profile" id="app-ai-profile" rows="3" maxlength="2000" spellcheck="true" placeholder="e.g. I'm a backend engineer writing API docs. Keep answers short, use British spelling."></textarea>
       </div>
       <div class="row">
-        <div><div class="row-label">Default reasoning effort</div><div class="row-desc">Used for new chats; change it per chat in Mark's header.</div></div>
-        <div class="segmented" data-setting="aiEffort">
-          <button data-value="off">Off</button><button data-value="low">Low</button><button data-value="high">High</button><button data-value="max">Max</button>
+        <div><div class="row-label">Memory</div><div class="row-desc">Mark saves lasting facts and preferences you mention and uses them in later chats.</div></div>
+        <div class="segmented" data-setting="aiMemory">
+          <button data-value="on">On</button><button data-value="off">Off</button>
         </div>
       </div>
-      <div class="row">
-        <div><div class="row-label">Model</div><div class="row-desc">DeepSeek V4.1 Flash via the Command Code gateway.</div></div>
-        <span class="ai-model-id">deepseek/deepseek-v4.1-flash</span>
-      </div>
-      <p class="ai-privacy">Mark sends the open document to Command Code when you ask. Reasoning and chats stay on this device.</p>
+      <ul class="ai-memory-list" aria-label="What Mark remembers"></ul>
+      <p class="ai-privacy">When you ask, Mark sends your message, the open document (for a large one, its outline and the parts Mark reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. In an open folder Mark can also search and read its other Markdown files. Chats and memory are stored only on this device.</p>
     </div>
+    <div class="settings-foot"><button class="btn btn-outline" data-action="settings-reset">Reset to defaults</button></div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
          ids (for aria) are prefixed so rendered heading ids can't collide. -->
     <div class="font-menu popover" id="app-font-menu" role="listbox" aria-label="Fonts" hidden></div>
@@ -331,11 +374,48 @@
     </div>
   </dialog>
 
+  <dialog class="dialog dlg-provider" aria-labelledby="provider-title">
+    <div class="dialog-head">
+      <h2 id="provider-title">Add model provider</h2>
+    </div>
+    <div class="segmented prov-tabs" role="radiogroup" aria-label="Kind of provider">
+      <button role="radio" data-prov-tab="builtin" aria-checked="true">Third-party model provider</button>
+      <button role="radio" data-prov-tab="custom" aria-checked="false">Custom model API</button>
+    </div>
+    <div class="prov-form" data-prov-pane="builtin">
+      <div class="segmented prov-builtins" role="radiogroup" aria-label="Provider"></div>
+      <label class="prov-field prov-builtin-key"><span>API key</span>
+        <span class="search-field"><input class="prov-key" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" /></span></label>
+      <p class="row-desc prov-note"></p>
+    </div>
+    <div class="prov-form" data-prov-pane="custom" hidden>
+      <label class="prov-field"><span>Provider ID</span>
+        <span class="search-field"><input class="prov-id" placeholder="my-gateway" maxlength="32" autocomplete="off" spellcheck="false" /></span></label>
+      <label class="prov-field"><span>Base URL</span>
+        <span class="search-field"><input class="prov-url" placeholder="https://gateway.example/v1" autocomplete="off" spellcheck="false" /></span></label>
+      <div class="prov-field"><span id="prov-api-label">API protocol</span>
+        <div class="segmented prov-apis" role="radiogroup" aria-labelledby="prov-api-label">
+          <button role="radio" data-prov-api="openai-completions" aria-checked="true">OpenAI chat completions</button>
+          <button role="radio" data-prov-api="anthropic-messages" aria-checked="false">Anthropic messages</button>
+        </div></div>
+      <label class="prov-field"><span>API key</span>
+        <span class="search-field"><input class="prov-custom-key" type="password" placeholder="Leave empty for a keyless local server" autocomplete="off" spellcheck="false" /></span></label>
+      <label class="prov-field"><span>Models</span>
+        <textarea class="prov-models" rows="2" spellcheck="false" placeholder="One model id per line. Leave empty to fetch the list from the endpoint."></textarea></label>
+      <p class="row-desc">The Provider ID is permanent: chats and saved keys refer to it.</p>
+    </div>
+    <div class="dialog-foot">
+      <span class="st-spacer"></span>
+      <button class="btn btn-outline" value="cancel">Cancel</button>
+      <button class="btn btn-primary" value="add">Add</button>
+    </div>
+  </dialog>
+
   <dialog class="dialog dlg-palette" aria-label="Command palette">
     <div class="palette-box">
       <label class="search-field palette-field">
         <svg><use href="#i-search"/></svg>
-        <input class="palette-input" type="text" placeholder="Type a command" spellcheck="false" aria-label="Type a command" />
+        <input class="palette-input" type="text" placeholder="Search commands, files, and headings" spellcheck="false" aria-label="Search commands, files, and headings" />
       </label>
       <div class="palette-list"></div>
       <div class="palette-foot">
@@ -348,7 +428,7 @@
 
   <dialog class="dialog dlg-about" aria-labelledby="about-title">
     <img class="about-mark" src="assets/mark.png" alt="" width="76" height="76" />
-    <h2 id="about-title" class="about-name">Markdown</h2>
+    <h2 id="about-title" class="about-name">MarkdownEditor</h2>
     <p class="about-version">Version <span class="about-ver">—</span></p>
     <p class="about-desc">A calm Markdown viewer and editor for the desktop. Read, edit with a live preview, and export to PDF.</p>
     <p class="about-built">Built with Tauri</p>

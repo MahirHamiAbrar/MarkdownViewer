@@ -1,8 +1,11 @@
 // Loaded before first paint so a saved dark theme never flashes light; main.js's applySettings reuses applyTheme.
 function applyTheme(theme, root = document.documentElement) {
   // Palettes ride on a light/dark base so every [data-theme] rule still applies.
-  const palette = theme === "monokai" || theme === "vercel" ? theme : null;
-  root.dataset.theme = { monokai: "light", vercel: "dark", system: matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light" }[theme] || theme;
+  // "system" follows the OS with the reader palettes (Sage by day, Plum after dark).
+  if (theme === "system") theme = matchMedia("(prefers-color-scheme: dark)").matches ? "plum" : "sage";
+  const base = { sepia: "light", eink: "light", monokai: "light", paper: "light", sage: "light", dusk: "dark", forest: "dark", midnight: "dark", plum: "dark", vercel: "dark" }[theme];
+  const palette = base ? theme : null;
+  root.dataset.theme = base || theme;
   if (palette) root.dataset.palette = palette; else delete root.dataset.palette;
 }
 try {
