@@ -6,6 +6,8 @@ All notable changes to MarkdownEditor are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-11-15
+
 ### Added
 
 - Mark works with several model providers: DeepSeek, OpenAI, Anthropic, OpenRouter, Ollama, and
