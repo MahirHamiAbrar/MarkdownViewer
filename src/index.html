@@ -182,7 +182,7 @@
             <button class="ai-title" data-action="ai-rename" data-tip="Rename chat" aria-label="Rename chat">New chat</button>
             <input class="ai-title-input" placeholder="Chat name" maxlength="120" aria-label="Chat name" hidden />
             <button class="ai-sub" data-action="ai-effort-menu" aria-haspopup="menu" aria-expanded="false" aria-label="Model and reasoning effort">
-              <span class="ai-model-name">DeepSeek V4.1 Flash</span>
+              <span class="ai-model-name">Select model</span>
               <span class="ai-effort-label">High</span>
               <svg><use href="#i-down"/></svg>
             </button>
@@ -326,23 +326,10 @@
     <div class="card ai-card">
       <div class="card-heading">Mark</div>
       <div class="row">
-        <div><div class="row-label">Command Code API key</div><div class="row-desc ai-key-status">Checking…</div></div>
-        <div class="ai-key-box">
-          <label class="search-field ai-key-field"><input class="ai-key-input" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" aria-label="Command Code API key" /></label>
-          <button class="btn" data-action="ai-save-key">Save</button>
-          <button class="btn btn-ghost" data-action="ai-clear-key">Clear</button>
-        </div>
+        <div><div class="row-label">Models</div><div class="row-desc">The providers Mark can answer through. Keys are stored in your system keychain, never in the app's files.</div></div>
+        <button class="btn" data-action="ai-add-provider">Add model provider</button>
       </div>
-      <div class="row">
-        <div><div class="row-label">Default reasoning effort</div><div class="row-desc">Used for new chats; change it per chat in Mark's header.</div></div>
-        <div class="segmented" data-setting="aiEffort">
-          <button data-value="off">Off</button><button data-value="low">Low</button><button data-value="high">High</button><button data-value="max">Max</button>
-        </div>
-      </div>
-      <div class="row">
-        <div><div class="row-label">Model</div><div class="row-desc">DeepSeek V4.1 Flash via the Command Code gateway.</div></div>
-        <span class="ai-model-id">deepseek/deepseek-v4.1-flash</span>
-      </div>
+      <div class="ai-providers" aria-label="Model providers"></div>
       <div class="row ai-profile-row">
         <div><div class="row-label"><label for="app-ai-profile">About you</label></div><div class="row-desc">Who you are and how you like answers. Mark reads this in every chat.</div></div>
         <textarea class="ai-profile" id="app-ai-profile" rows="3" maxlength="2000" spellcheck="true" placeholder="e.g. I'm a backend engineer writing API docs. Keep answers short, use British spelling."></textarea>
@@ -354,7 +341,7 @@
         </div>
       </div>
       <ul class="ai-memory-list" aria-label="What Mark remembers"></ul>
-      <p class="ai-privacy">When you ask, Mark sends your message, the open document (for a large one, its outline and the parts Mark reads), your notes above, and saved memories to Command Code. In an open folder Mark can also search and read its other Markdown files. Chats and memory are stored only on this device.</p>
+      <p class="ai-privacy">When you ask, Mark sends your message, the open document (for a large one, its outline and the parts Mark reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. In an open folder Mark can also search and read its other Markdown files. Chats and memory are stored only on this device.</p>
     </div>
     <div class="settings-foot"><button class="btn btn-outline" data-action="settings-reset">Reset to defaults</button></div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
@@ -384,6 +371,43 @@
       <span class="st-spacer"></span>
       <button class="btn btn-outline" value="cancel">Cancel</button>
       <button class="btn btn-danger" value="delete">Delete</button>
+    </div>
+  </dialog>
+
+  <dialog class="dialog dlg-provider" aria-labelledby="provider-title">
+    <div class="dialog-head">
+      <h2 id="provider-title">Add model provider</h2>
+    </div>
+    <div class="segmented prov-tabs" role="radiogroup" aria-label="Kind of provider">
+      <button role="radio" data-prov-tab="builtin" aria-checked="true">Third-party model provider</button>
+      <button role="radio" data-prov-tab="custom" aria-checked="false">Custom model API</button>
+    </div>
+    <div class="prov-form" data-prov-pane="builtin">
+      <div class="segmented prov-builtins" role="radiogroup" aria-label="Provider"></div>
+      <label class="prov-field prov-builtin-key"><span>API key</span>
+        <span class="search-field"><input class="prov-key" type="password" placeholder="Paste API key" autocomplete="off" spellcheck="false" /></span></label>
+      <p class="row-desc prov-note"></p>
+    </div>
+    <div class="prov-form" data-prov-pane="custom" hidden>
+      <label class="prov-field"><span>Provider ID</span>
+        <span class="search-field"><input class="prov-id" placeholder="my-gateway" maxlength="32" autocomplete="off" spellcheck="false" /></span></label>
+      <label class="prov-field"><span>Base URL</span>
+        <span class="search-field"><input class="prov-url" placeholder="https://gateway.example/v1" autocomplete="off" spellcheck="false" /></span></label>
+      <div class="prov-field"><span id="prov-api-label">API protocol</span>
+        <div class="segmented prov-apis" role="radiogroup" aria-labelledby="prov-api-label">
+          <button role="radio" data-prov-api="openai-completions" aria-checked="true">OpenAI chat completions</button>
+          <button role="radio" data-prov-api="anthropic-messages" aria-checked="false">Anthropic messages</button>
+        </div></div>
+      <label class="prov-field"><span>API key</span>
+        <span class="search-field"><input class="prov-custom-key" type="password" placeholder="Leave empty for a keyless local server" autocomplete="off" spellcheck="false" /></span></label>
+      <label class="prov-field"><span>Models</span>
+        <textarea class="prov-models" rows="2" spellcheck="false" placeholder="One model id per line. Leave empty to fetch the list from the endpoint."></textarea></label>
+      <p class="row-desc">The Provider ID is permanent: chats and saved keys refer to it.</p>
+    </div>
+    <div class="dialog-foot">
+      <span class="st-spacer"></span>
+      <button class="btn btn-outline" value="cancel">Cancel</button>
+      <button class="btn btn-primary" value="add">Add</button>
     </div>
   </dialog>
 

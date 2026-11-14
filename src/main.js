@@ -79,8 +79,9 @@ const el = {
   aiStop: $(".ai-stop"),
   aiSelChip: $(".ai-selchip"),
   aiMenu: $(".ai-menu"),
-  aiKeyInput: $(".ai-key-input"),
-  aiKeyStatus: $(".ai-key-status"),
+  aiModelName: $(".ai-model-name"),
+  aiProviders: $(".ai-providers"),
+  provDlg: $(".dlg-provider"),
   aiProfile: $(".ai-profile"),
   aiMemoryList: $(".ai-memory-list"),
   aiDelDlg: $(".dlg-ai-delete"),
@@ -98,15 +99,18 @@ const ACCENTS = {
 // Setting -> [CSS variable, what it falls back to]
 const FONT_VARS = { fontUi: ["--font-ui", "--font-ui-base"], fontEditor: ["--font-editor", "--font-mono"], fontView: ["--font-view", "--font-ui"] };
 const TILE_COLORS = ["#2F80F5", "#F5822E", "#27B5C9", "#8C7CF0", "#F26B8A", "#4F7CF0", "#35B864", "#6B7384"];
-const AI_MODEL = "deepseek/deepseek-v4.1-flash";
-const AI_MODEL_NAME = "DeepSeek V4.1 Flash";
-const AI_EFFORTS = [["off", "Off"], ["low", "Low"], ["high", "High"], ["max", "Max"]];
+// Effort levels come from each model; this is only their menu order and wording.
+const AI_EFFORT_ORDER = ["off", "auto", "none", "minimal", "low", "medium", "high", "xhigh", "max"];
+const AI_EFFORT_INFO = {
+  off: ["Off", "Fastest"], auto: ["Auto", "Model default"], none: ["None", "Fastest"], minimal: ["Minimal", "Fast"], low: ["Low", "Quick"],
+  medium: ["Medium", "Balanced"], high: ["High", "Deeper"], xhigh: ["Extra high", "Thorough"], max: ["Max", "Deepest"],
+};
 const AI_MAX_REASONING = 100_000;
 const AI_TOOL_LABELS = {
   read_document: "Read document", search_document: "Searched document", list_files: "Listed files",
   search_files: "Searched folder", read_file: "Read file", remember: "Remembered", forget: "Forgot",
 };
-const aiEffortName = (value) => (AI_EFFORTS.find(([v]) => v === value) || ["high", "High"])[1];
+const aiEffortName = (value) => AI_EFFORT_INFO[value]?.[0] || value || "";
 
 // ---------- persistence (localStorage, per-viewer conveniences) ----------
 const store = {
@@ -119,7 +123,7 @@ const store = {
 };
 
 const DEFAULT_SETTINGS = {
-  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiMemory: "on",
+  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiProvider: "", aiModel: "", aiMemory: "on",
   lineHeight: "normal", align: "left", codeWrap: "scroll", tabSize: "2", autosave: "off", startup: "last",
 };
 const READ_WIDTHS = { narrow: "640px", normal: "760px", wide: "980px", full: "100%" };
@@ -140,7 +144,8 @@ const state = {
   ai: {
     open: false, chat: null, list: [], streaming: false, requestId: null, selection: null, reply: null,
     renderTimer: null, pinned: true, current: null, chip: null, deleteTarget: null, titleBusy: false,
-    memory: normalizeMemory(null), // what Mark knows about the user; lives in ~/.markdown-viewer-app/memory.json
+    providers: [], // model providers with their key status; see providers.rs
+    memory: normalizeMemory(null), // what Mark knows about the user; lives in ~/.markdowneditor/memory.json
   },
 };
 
@@ -230,7 +235,7 @@ function applySettings() {
     for (const b of $$("button", seg)) b.setAttribute("aria-checked", String(b.dataset.value === s[seg.dataset.setting]));
   }
   for (const b of $$(".swatch")) b.setAttribute("aria-checked", String(b.dataset.accent === s.accent));
-  el.aiEffortLabel.textContent = aiEffortName(s.aiEffort);
+  updateAiModelLabel();
   store.set("settings", s);
   if (mermaidTheme && mermaidTheme !== `${el.root.dataset.theme}|${el.root.dataset.palette}|${el.root.dataset.accent}`) {
     for (const block of $$(".mermaid-block", el.preview)) renderMermaid(block);
@@ -249,7 +254,6 @@ el.settingsDlg.addEventListener("click", (e) => {
   const seg = e.target.closest("[data-setting] button");
   if (seg) {
     const key = seg.parentElement.dataset.setting;
-    if (key === "aiEffort") { setAiEffort(seg.dataset.value); return; }
     state.settings[key] = seg.dataset.value;
   }
   if (sw || seg) applySettings();
@@ -263,8 +267,7 @@ let fontsLoaded = false;
 function openSettings() {
   applySettings();
   for (const input of $$("[data-font]", el.settingsDlg)) input.value = state.settings[input.dataset.font];
-  el.aiKeyInput.value = "";
-  refreshAiStatus();
+  loadAiProviders();
   loadAiMemory().then(() => {
     el.aiProfile.value = state.ai.memory.profile;
     renderAiMemory();
@@ -1557,7 +1560,7 @@ const actions = {
   "open-folder": pickFolder,
   "refresh-folder": loadTree,
   "settings-reset": () => {
-    state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiMemory: state.settings.aiMemory };
+    state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiProvider: state.settings.aiProvider, aiModel: state.settings.aiModel, aiMemory: state.settings.aiMemory };
     applySettings();
     for (const input of $$("[data-font]", el.settingsDlg)) input.value = "";
   },
@@ -1588,8 +1591,7 @@ const actions = {
   "ai-rename": startAiRename,
   "ai-effort-menu": (b) => (el.aiMenu.hidden ? openAiEffortMenu(b) : closeAiEffortMenu()),
   "ai-stop": stopAi,
-  "ai-save-key": saveAiKey,
-  "ai-clear-key": clearAiKey,
+  "ai-add-provider": openProviderDialog,
   "ai-forget": (b) => changeAiMemory((memory) => { memory.items = memory.items.filter((item) => item.id !== b.dataset.id); }),
   "ai-clear-selection": () => { state.ai.selection = null; updateAiChrome(); el.aiInput.focus(); },
   "ai-clear-reply": () => { state.ai.reply = null; updateAiChrome(); el.aiInput.focus(); },
@@ -1870,7 +1872,7 @@ function selectionDetail(selection) {
 function updateAiChrome() {
   const chat = state.ai.chat;
   el.aiTitle.textContent = chat?.title || "New chat";
-  el.aiEffortLabel.textContent = aiEffortName(state.settings.aiEffort);
+  updateAiModelLabel();
   const file = currentFileMeta();
   el.aiChipFile.hidden = !file;
   if (file) {
@@ -1940,8 +1942,9 @@ function ensureChat() {
     createdAt: now,
     updatedAt: now,
     file: currentFileMeta(),
-    model: AI_MODEL,
-    effort: state.settings.aiEffort,
+    provider: aiCurrent()?.provider.id || "",
+    model: aiCurrent()?.model.id || "",
+    effort: aiEffort(),
     messages: [],
   };
   return state.ai.chat;
@@ -2026,7 +2029,7 @@ function seedActions(chat, effort) {
   if (lastUser?.selection?.text) {
     actions.push({ kind: "selection", id: "selection", label: "Selection attached", detail: selectionDetail(lastUser.selection), status: "done" });
   }
-  actions.push({ kind: "model", id: "model", label: AI_MODEL_NAME, detail: `effort ${aiEffortName(effort).toLowerCase()}`, status: "running" });
+  actions.push({ kind: "model", id: "model", label: aiModelName(aiCurrent()), detail: effort ? `effort ${aiEffortName(effort).toLowerCase()}` : aiCurrent()?.provider.name || "", status: "running" });
   return actions;
 }
 
@@ -2087,7 +2090,7 @@ function updateAiMeta(node, msg) {
   const parts = [];
   if (msg.timing?.durationMs) parts.push(fmtDuration(msg.timing.durationMs));
   if (msg.usage) parts.push(...usageParts(msg.usage));
-  parts.push(aiEffortName(msg.effort || state.settings.aiEffort).toLowerCase());
+  if (msg.effort) parts.push(aiEffortName(msg.effort).toLowerCase());
   meta.textContent = parts.join(" · ");
   meta.title = msg.usage
     ? `Input ${Number(msg.usage.input || 0).toLocaleString()} · Output ${Number(msg.usage.output || 0).toLocaleString()}${msg.usage.reasoning ? ` · Reasoning ${Number(msg.usage.reasoning).toLocaleString()}` : ""}${msg.usage.cost != null ? ` · Cost ${formatCost(msg.usage.cost)}` : ""}`
@@ -2168,7 +2171,7 @@ function renderAiMessage(msg, index) {
   node.innerHTML = `<header class="ai-msg-head">
       <img class="ai-avatar-sm" src="assets/mark.png" alt="" width="20" height="20" />
       <span class="ai-name">Mark</span>
-      <span class="ai-tag">${AI_MODEL_NAME}</span>
+      <span class="ai-tag">${escapeHtml(msg.modelName || "DeepSeek V4.1 Flash")}</span>
       <span class="ai-tag ai-tag-effort"></span>
       <time class="ai-time"></time>
     </header>
@@ -2184,7 +2187,8 @@ function renderAiMessage(msg, index) {
     <div class="md chat-md"></div>
     <footer class="ai-actions"><button class="ai-act" data-ai-copy>Copy</button><span class="ai-meta"></span></footer>`;
 
-  $(".ai-tag-effort", node).textContent = aiEffortName(msg.effort || state.settings.aiEffort);
+  $(".ai-tag-effort", node).textContent = aiEffortName(msg.effort);
+  $(".ai-tag-effort", node).hidden = !msg.effort;
   const created = msg.createdAt ? new Date(msg.createdAt) : null;
   $(".ai-time", node).textContent = created && !Number.isNaN(created.getTime()) ? created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "";
   for (const action of msg.actions || []) if (action.status === "running") action.status = "done";
@@ -2304,12 +2308,16 @@ async function sendAiMessage(text) {
     toast("Stop Mark first.", "error");
     return;
   }
+  if (!aiCurrent()) {
+    toast("Choose a model first: Settings → Mark → Add model provider.", "error");
+    return;
+  }
   if (!state.ai.open) openAiPanel({ focus: false });
   const chat = ensureChat();
   const selection = state.ai.selection;
   const reply = state.ai.reply;
   chat.file = currentFileMeta();
-  chat.effort = state.settings.aiEffort;
+  chat.effort = aiEffort();
   chat.messages.push({ role: "user", content: value, selection: selection || null, reply: reply || null, createdAt: new Date().toISOString() });
   state.ai.selection = null;
   state.ai.reply = null;
@@ -2327,7 +2335,14 @@ async function sendAiMessage(text) {
 async function requestAssistant() {
   const chat = state.ai.chat;
   if (!chat || !chat.messages.length || state.ai.streaming) return;
-  const effort = (chat.effort = state.settings.aiEffort);
+  const target = aiCurrent();
+  if (!target) {
+    toast("Choose a model first: Settings → Mark → Add model provider.", "error");
+    return;
+  }
+  chat.provider = target.provider.id;
+  chat.model = target.model.id;
+  const effort = (chat.effort = aiEffort(target));
   chat.file = currentFileMeta();
   const assistant = {
     role: "assistant",
@@ -2339,6 +2354,7 @@ async function requestAssistant() {
     timing: null,
     stopped: false,
     effort,
+    modelName: aiModelName(target),
     createdAt: new Date().toISOString(),
   };
   chat.messages.push(assistant);
@@ -2390,7 +2406,8 @@ async function compactAiHistory(chat, current) {
   const action = { kind: "context", id: "summary", label: "Summarized earlier messages", detail: `${start - from} messages`, status: "done" };
   try {
     chat.summary = await invoke("ai_complete", {
-      model: AI_MODEL,
+      provider: chat.provider,
+      model: chat.model,
       maxTokens: 800,
       messages: [
         { role: "system", content: "You compress a conversation between a user and Mark, a Markdown document assistant, so it can continue without the original messages. Keep what the user is trying to do, decisions and conclusions reached, facts and names later turns may rely on, and any open question. Drop pleasantries and exact wording. Write terse bullet points, at most 250 words." },
@@ -2421,7 +2438,8 @@ async function runAssistantTurn(chat, effort, channel) {
     state.ai.requestId = (crypto.randomUUID && crypto.randomUUID()) || `${nanoid8()}${nanoid8()}`;
     const reply = await invoke("ai_chat", {
       requestId: state.ai.requestId,
-      model: AI_MODEL,
+      provider: chat.provider,
+      model: chat.model,
       effort,
       messages,
       tools,
@@ -2449,6 +2467,7 @@ async function runAssistantTurn(chat, effort, channel) {
       role: "assistant",
       content: reply.content || "",
       ...(reply.reasoning ? { reasoning_content: reply.reasoning } : {}),
+      ...(reply.providerBlocks ? { provider_blocks: reply.providerBlocks } : {}), // handed back unchanged; see anthropic.rs
       tool_calls: calls.map((call) => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })),
     });
     for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, content: await runAiToolCall(current, call) });
@@ -2657,7 +2676,8 @@ async function maybeGenerateTitle() {
   state.ai.titleBusy = true;
   try {
     const title = await invoke("ai_complete", {
-      model: AI_MODEL,
+      provider: chat.provider,
+      model: chat.model,
       maxTokens: 100,
       messages: [
         { role: "system", content: "You name chat conversations. Reply with a short title of 2 to 5 words. No quotes, no markdown, no punctuation at the end." },
@@ -2867,9 +2887,72 @@ function updateAiToggle() {
   el.win.dataset.ai = state.ai.open ? "open" : "closed";
 }
 
+// ---------- Mark: model providers ----------
+const aiProviderById = (id) => state.ai.providers.find((provider) => provider.id === id);
+const aiUsable = (provider) => (provider.hasKey || provider.noKey) && provider.models.length > 0;
+const aiModelName = (target) => (target ? target.model.name || target.model.id : "Select model");
+
+/** The provider + model in use: the open chat's own, else the default for new chats. */
+function aiCurrent() {
+  const chat = state.ai.chat;
+  // Chats from before providers existed all used the Command Code gateway.
+  const picks = [[chat?.provider || (chat?.model ? "commandcode" : ""), chat?.model], [state.settings.aiProvider, state.settings.aiModel]];
+  for (const [providerId, modelId] of picks) {
+    const provider = aiProviderById(providerId);
+    const model = provider?.models.find((item) => item.id === modelId);
+    if (model && aiUsable(provider)) return { provider, model };
+  }
+  return null;
+}
+
+function aiEfforts(target) {
+  const levels = Object.keys((target && (target.model.reasoningEfforts || target.provider.reasoningEfforts)) || {});
+  const rank = (level) => (AI_EFFORT_ORDER.indexOf(level) + 1 || 99);
+  return levels.sort((a, b) => rank(a) - rank(b));
+}
+
+/** The effort to send: the user's last choice when this model offers it, else the provider's default. */
+function aiEffort(target = aiCurrent()) {
+  const levels = aiEfforts(target);
+  if (!levels.length) return ""; // this model has no Effort menu
+  return [state.settings.aiEffort, target.provider.reasoning].find((level) => levels.includes(level)) || levels[0];
+}
+
+function updateAiModelLabel() {
+  const target = aiCurrent();
+  const effort = aiEffort(target);
+  el.aiModelName.textContent = aiModelName(target);
+  el.aiEffortLabel.textContent = aiEffortName(effort);
+  el.aiEffortLabel.hidden = !effort;
+}
+
+async function loadAiProviders() {
+  try {
+    state.ai.providers = await invoke("providers_list");
+  } catch (err) {
+    toast(`Couldn't load model providers. ${err}`, "error");
+  }
+  // First usable model becomes the default so a fresh setup can chat right away.
+  if (!aiProviderById(state.settings.aiProvider)?.models.some((model) => model.id === state.settings.aiModel)) {
+    const provider = state.ai.providers.find(aiUsable);
+    if (provider) Object.assign(state.settings, { aiProvider: provider.id, aiModel: provider.models[0].id });
+  }
+  renderAiProviders();
+  applySettings();
+}
+
+function setAiModel(providerId, modelId) {
+  const provider = aiProviderById(providerId);
+  if (!provider?.models.some((model) => model.id === modelId)) return;
+  Object.assign(state.settings, { aiProvider: providerId, aiModel: modelId });
+  const chat = state.ai.chat;
+  if (chat) Object.assign(chat, { provider: providerId, model: modelId });
+  setAiEffort(aiEffort()); // keeps the effort valid for the new model, saves and repaints
+}
+
 function setAiEffort(value) {
-  if (!AI_EFFORTS.some(([effort]) => effort === value)) return;
-  state.settings.aiEffort = value;
+  if (value && !aiEfforts(aiCurrent()).includes(value)) return;
+  if (value) state.settings.aiEffort = value;
   const chat = state.ai.chat;
   if (chat) {
     chat.effort = value;
@@ -2881,11 +2964,24 @@ function setAiEffort(value) {
 }
 
 function openAiEffortMenu(anchor) {
-  const current = state.settings.aiEffort;
-  const hints = { off: "Fastest", low: "Balanced", high: "Deeper", max: "Deepest" };
-  el.aiMenu.innerHTML = `<div class="ai-menu-model"><b>${AI_MODEL_NAME}</b><span>${AI_MODEL}</span></div>
-    <div class="ai-menu-label">Reasoning effort</div>` + AI_EFFORTS.map(([value, label]) =>
-      `<button role="menuitemradio" data-effort="${value}" aria-checked="${value === current}">${svg("check")}<span>${label}</span><span class="ai-menu-desc">${hints[value]}</span></button>`).join("");
+  const target = aiCurrent();
+  const effort = aiEffort(target);
+  const providers = state.ai.providers.filter(aiUsable);
+  const count = providers.reduce((n, provider) => n + provider.models.length, 0);
+  let html = "";
+  if (aiEfforts(target).length) {
+    html += `<div class="ai-menu-label">Reasoning effort</div>` + aiEfforts(target).map((level) =>
+      `<button role="menuitemradio" data-effort="${escapeHtml(level)}" aria-checked="${level === effort}">${svg("check")}<span>${escapeHtml(aiEffortName(level))}</span><span class="ai-menu-desc">${AI_EFFORT_INFO[level]?.[1] || ""}</span></button>`).join("");
+  }
+  if (count > 10) html += `<input class="ai-menu-filter" type="text" placeholder="Search models" spellcheck="false" aria-label="Search models" />`;
+  for (const provider of providers) {
+    html += `<div class="ai-menu-label" data-group="${escapeHtml(provider.id)}">${escapeHtml(provider.name || provider.id)}</div>` + provider.models.map((model) =>
+      `<button role="menuitemradio" data-provider="${escapeHtml(provider.id)}" data-model="${escapeHtml(model.id)}" title="${escapeHtml(model.id)}"
+        aria-checked="${target?.provider.id === provider.id && target.model.id === model.id}">${svg("check")}<span>${escapeHtml(model.name || model.id)}</span></button>`).join("");
+  }
+  if (!providers.length) html += `<div class="ai-menu-label">No models yet</div>`;
+  html += `<button data-ai-action="settings">${svg("settings")}<span>Manage model providers…</span></button>`;
+  el.aiMenu.innerHTML = html;
   el.aiMenu.hidden = false;
   anchor.setAttribute("aria-expanded", "true");
   const rect = anchor.getBoundingClientRect();
@@ -2893,7 +2989,7 @@ function openAiEffortMenu(anchor) {
   const left = Math.min(innerWidth - menuRect.width - 8, Math.max(8, rect.right - menuRect.width));
   const top = rect.bottom + 6 + menuRect.height < innerHeight ? rect.bottom + 6 : Math.max(8, rect.top - menuRect.height - 6);
   Object.assign(el.aiMenu.style, { left: `${left}px`, top: `${top}px` });
-  el.aiMenu.querySelector('[aria-checked="true"]')?.focus();
+  (el.aiMenu.querySelector(".ai-menu-filter") || el.aiMenu.querySelector('[aria-checked="true"]'))?.focus();
 }
 
 function closeAiEffortMenu() {
@@ -2901,45 +2997,144 @@ function closeAiEffortMenu() {
   $('[data-action="ai-effort-menu"]')?.setAttribute("aria-expanded", "false");
 }
 
-async function refreshAiStatus() {
+function aiKeyStatus(provider) {
+  const models = provider.models.length ? `${provider.models.length} ${provider.models.length === 1 ? "model" : "models"}` : "no models yet — fetch them";
+  if (provider.noKey) return `No key needed · ${models}`;
+  const preview = provider.keyPreview ? ` ${provider.keyPreview}` : "";
+  const where = {
+    environment: `Key from $${provider.apiKeyEnv}`,
+    keychain: `Key${preview} in your system keychain`,
+    file: `Key${preview} in a private file (no system keychain answered)`,
+    ".env": "Key from the project's .env",
+  }[provider.keySource];
+  return where ? `${where} · ${models}` : "No key yet — add one to use this provider.";
+}
+
+function renderAiProviders() {
+  const shown = state.ai.providers.filter((provider) => provider.hasKey || !provider.builtin || (provider.noKey && provider.models.length));
+  el.aiProviders.innerHTML = shown.map((provider) => {
+    const name = escapeHtml(provider.name || provider.id);
+    return `<div class="ai-prov" data-provider="${escapeHtml(provider.id)}">
+      <div class="ai-prov-head"><b>${name}</b><span class="ai-model-id">${escapeHtml(provider.id)}</span><span class="st-spacer"></span>
+        <button class="btn btn-ghost" data-prov-act="fetch">Fetch available models</button>
+        <button class="btn btn-ghost" data-prov-act="remove">Remove</button></div>
+      <div class="row-desc ai-key-status ${aiUsable(provider) ? "ok" : "warn"}">${escapeHtml(aiKeyStatus(provider))}</div>
+      ${provider.noKey ? "" : `<div class="ai-key-box"><label class="search-field ai-key-field"><input type="password" placeholder="${provider.hasKey ? "Replace API key" : "Paste API key"}" autocomplete="off" spellcheck="false" aria-label="${name} API key" /></label>
+        <button class="btn" data-prov-act="key">Save</button></div>`}
+    </div>`;
+  }).join("") || `<p class="row-desc ai-prov-empty">No provider yet. Add one to start chatting with Mark.</p>`;
+}
+
+async function fetchAiModels(id, { quiet = false } = {}) {
   try {
-    const status = await invoke("ai_status");
-    state.ai.hasKey = status.hasKey;
-    el.aiKeyStatus.classList.toggle("ok", Boolean(status.hasKey));
-    el.aiKeyStatus.classList.toggle("warn", !status.hasKey);
-    el.aiKeyStatus.textContent = status.hasKey
-      ? status.source === "config" ? "Saved in this app." : status.source === "environment" ? "Loaded from the environment." : "Loaded from .env."
-      : "No key yet — add one to start chatting.";
-  } catch {
-    el.aiKeyStatus.textContent = "Couldn't check the key.";
+    const provider = await invoke("provider_fetch_models", { id });
+    if (!quiet) toast(`${provider.models.length} models from ${provider.name || provider.id}.`);
+    return true;
+  } catch (err) {
+    toast(String(err), "error");
+    return false;
   }
 }
 
-async function saveAiKey() {
-  const key = el.aiKeyInput.value.trim();
-  if (!key) {
-    el.aiKeyInput.focus();
+async function aiProviderAction(id, act, row) {
+  const provider = aiProviderById(id);
+  if (!provider) return;
+  try {
+    if (act === "fetch") await fetchAiModels(id);
+    if (act === "remove") {
+      await invoke("provider_delete", { id });
+      toast(`${provider.name || id} removed, together with its saved key.`);
+    }
+    if (act === "key") {
+      const input = $("input", row);
+      const key = input.value.trim();
+      if (!key) { input.focus(); return; }
+      await invoke("provider_set_key", { id, key });
+      toast("API key saved.");
+      if (!provider.models.length) await fetchAiModels(id, { quiet: true });
+    }
+  } catch (err) {
+    toast(String(err), "error");
+  }
+  await loadAiProviders();
+}
+
+el.aiProviders.addEventListener("click", (e) => {
+  const button = e.target.closest("[data-prov-act]");
+  if (button) aiProviderAction(button.closest(".ai-prov").dataset.provider, button.dataset.provAct, button.closest(".ai-prov"));
+});
+el.aiProviders.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing || e.target.tagName !== "INPUT") return;
+  e.preventDefault();
+  aiProviderAction(e.target.closest(".ai-prov").dataset.provider, "key", e.target.closest(".ai-prov"));
+});
+
+// "Add model provider": a shipped provider needs only a key; anything else is a custom API.
+const prov = { tab: "builtin", builtin: "", api: "openai-completions" };
+
+function paintProviderDialog() {
+  for (const button of $$("[data-prov-tab]", el.provDlg)) button.setAttribute("aria-checked", String(button.dataset.provTab === prov.tab));
+  for (const pane of $$("[data-prov-pane]", el.provDlg)) pane.hidden = pane.dataset.provPane !== prov.tab;
+  for (const button of $$("[data-prov-builtin]", el.provDlg)) button.setAttribute("aria-checked", String(button.dataset.provBuiltin === prov.builtin));
+  for (const button of $$("[data-prov-api]", el.provDlg)) button.setAttribute("aria-checked", String(button.dataset.provApi === prov.api));
+  const provider = aiProviderById(prov.builtin);
+  $(".prov-builtin-key", el.provDlg).hidden = !provider || provider.noKey;
+  $(".prov-note", el.provDlg).textContent = !provider ? "Every shipped provider is already set up."
+    : provider.noKey ? `Uses the server at ${provider.baseURL}. Start it first; its installed models are listed automatically.`
+      : `Requests go to ${provider.baseURL}. The key is stored in your system keychain.`;
+}
+
+function openProviderDialog() {
+  const builtins = state.ai.providers.filter((provider) => provider.builtin);
+  $(".prov-builtins", el.provDlg).innerHTML = builtins.map((provider) =>
+    `<button role="radio" data-prov-builtin="${escapeHtml(provider.id)}">${escapeHtml(provider.name || provider.id)}</button>`).join("");
+  Object.assign(prov, { tab: "builtin", builtin: (builtins.find((provider) => !aiUsable(provider)) || builtins[0])?.id || "", api: "openai-completions" });
+  for (const input of $$("input, textarea", el.provDlg)) input.value = "";
+  paintProviderDialog();
+  el.provDlg.returnValue = "cancel";
+  el.provDlg.showModal();
+}
+
+async function addProvider() {
+  let id = prov.builtin;
+  let key = $(".prov-key", el.provDlg).value.trim();
+  if (prov.tab === "custom") {
+    id = $(".prov-id", el.provDlg).value.trim();
+    key = $(".prov-custom-key", el.provDlg).value.trim();
+    const models = $(".prov-models", el.provDlg).value.split(/[\n,]/).map((line) => line.trim()).filter(Boolean).map((model) => ({ id: model }));
+    if (aiProviderById(id)) throw new Error(`“${id}” already exists. Pick another Provider ID.`);
+    await invoke("provider_save", { provider: { id, name: id, api: prov.api, baseURL: $(".prov-url", el.provDlg).value.trim(), noKey: !key, models } });
+  } else if (!id) {
+    throw new Error("Pick a provider.");
+  } else if (!key && !aiProviderById(id).noKey && !aiProviderById(id).hasKey) {
+    throw new Error("Paste an API key.");
+  }
+  if (key) await invoke("provider_set_key", { id, key });
+  await loadAiProviders();
+  if (!aiProviderById(id)?.models.length || prov.tab === "builtin") await fetchAiModels(id);
+  await loadAiProviders();
+}
+
+el.provDlg.addEventListener("click", async (e) => {
+  const pick = e.target.closest("[data-prov-tab], [data-prov-builtin], [data-prov-api]");
+  if (pick) {
+    Object.assign(prov, { tab: pick.dataset.provTab || prov.tab, builtin: pick.dataset.provBuiltin || prov.builtin, api: pick.dataset.provApi || prov.api });
+    paintProviderDialog();
     return;
   }
+  const button = e.target.closest("button[value]");
+  if (!button) return;
+  if (button.value !== "add") { el.provDlg.close("cancel"); return; }
+  button.disabled = true;
   try {
-    await invoke("ai_set_key", { key });
-    el.aiKeyInput.value = "";
-    toast("API key saved.");
-    refreshAiStatus();
+    await addProvider();
+    el.provDlg.close("add");
   } catch (err) {
-    toast(`Couldn't save the key. ${err}`, "error");
+    toast(String(err?.message || err), "error");
+  } finally {
+    button.disabled = false;
   }
-}
-
-async function clearAiKey() {
-  try {
-    await invoke("ai_set_key", { key: null });
-    toast("Saved API key removed.");
-    refreshAiStatus();
-  } catch (err) {
-    toast(`Couldn't remove the key. ${err}`, "error");
-  }
-}
+});
 
 function hideSelChip() {
   el.aiSelChip.hidden = true;
@@ -3136,22 +3331,24 @@ el.aiHistoryList.addEventListener("keydown", (e) => {
 });
 
 el.aiMenu.addEventListener("click", (e) => {
-  const button = e.target.closest("[data-effort]");
+  const button = e.target.closest("[data-effort], [data-model], [data-ai-action]");
   if (!button) return;
-  setAiEffort(button.dataset.effort);
+  if (button.dataset.effort) setAiEffort(button.dataset.effort);
+  else if (button.dataset.model) setAiModel(button.dataset.provider, button.dataset.model);
+  else openSettings();
   closeAiEffortMenu();
+});
+el.aiMenu.addEventListener("input", (e) => {
+  if (!e.target.classList.contains("ai-menu-filter")) return;
+  const query = e.target.value.trim().toLowerCase();
+  for (const button of $$("[data-model]", el.aiMenu)) button.hidden = !`${button.textContent} ${button.dataset.model}`.toLowerCase().includes(query);
+  for (const label of $$("[data-group]", el.aiMenu)) label.hidden = !$(`[data-provider="${CSS.escape(label.dataset.group)}"]:not([hidden])`, el.aiMenu);
 });
 document.addEventListener("mousedown", (e) => {
   if (el.aiMenu.hidden) return;
   if (!e.target.closest(".ai-menu") && !e.target.closest('[data-action="ai-effort-menu"]')) closeAiEffortMenu();
 });
 
-el.aiKeyInput.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.isComposing) {
-    e.preventDefault();
-    saveAiKey();
-  }
-});
 
 el.aiSelChip.addEventListener("click", () => {
   if (state.ai.chip?.kind === "reply") replyMarkFromChip();
@@ -3281,6 +3478,7 @@ addEventListener("focus", () => {
   const aiW = store.get("aiW", null);
   if (aiW) el.root.style.setProperty("--ai-w", aiW);
   if (store.get("aiOpen", false)) openAiPanel({ focus: false });
+  loadAiProviders();
   loadAiMemory();
   if (state.folder) loadTree().catch(() => setFolder(null));
   // Path shortening (~) is cosmetic: apply it when it arrives instead of waiting on it.

@@ -13,7 +13,10 @@ use serde::Serialize;
 use tauri::Manager;
 
 mod ai;
+mod anthropic;
 mod chats;
+mod fsutil;
+mod providers;
 
 /// Syntect is the slowest step of a render; the preview re-renders on every edit, so
 /// unchanged code blocks reuse their highlighted HTML.
@@ -122,7 +125,46 @@ fn read_file(path: String) -> Result<String, String> {
 
 #[tauri::command(async)]
 fn write_file(path: String, contents: String) -> Result<(), String> {
-    fs::write(&path, contents).map_err(|e| e.to_string())
+    fsutil::atomic_write(Path::new(&path), contents.as_bytes(), false).map_err(|e| e.to_string())
+}
+
+fn draft_file(dir: &Path, id: &str) -> Result<std::path::PathBuf, String> {
+    if !(1..=64).contains(&id.len()) || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Invalid draft id.".into());
+    }
+    Ok(dir.join("drafts").join(format!("{id}.json")))
+}
+
+/// Unsaved text, kept so a crash or power cut does not lose it: `{ path, text, savedAt }`.
+#[tauri::command(async)]
+fn draft_save(app: tauri::AppHandle, id: String, json: String) -> Result<(), String> {
+    if json.len() > 20_000_000 || !serde_json::from_str::<serde_json::Value>(&json).is_ok_and(|v| v.is_object()) {
+        return Err("Invalid draft.".into());
+    }
+    let file = draft_file(&fsutil::ensure_app_dir(&app)?, &id)?;
+    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    fsutil::atomic_write(&file, json.as_bytes(), true).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn draft_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    match fs::remove_file(draft_file(&fsutil::app_dir(&app)?, &id)?) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// Every draft left behind, as `[id, json]` pairs.
+#[tauri::command(async)]
+fn drafts_list(app: tauri::AppHandle) -> Vec<(String, String)> {
+    let Ok(dir) = fsutil::app_dir(&app) else { return vec![] };
+    let Ok(entries) = fs::read_dir(dir.join("drafts")) else { return vec![] };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter_map(|p| Some((p.file_stem()?.to_str()?.to_owned(), fs::read_to_string(&p).ok()?)))
+        .collect()
 }
 
 #[tauri::command]
@@ -148,7 +190,7 @@ fn new_window(app: tauri::AppHandle) -> Result<(), String> {
     let windows = app.webview_windows();
     let label = (2..).map(|n| format!("main-{n}")).find(|l| !windows.contains_key(l)).unwrap();
     tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html?fresh=1".into()))
-        .title("Markdown")
+        .title("MarkdownEditor")
         .inner_size(1180., 780.)
         .min_inner_size(640., 420.)
         .decorations(false)
@@ -284,9 +326,15 @@ fn search_files(paths: Vec<String>, query: String) -> Vec<Hit> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .setup(|_| {
+        .setup(|app| {
             // Load syntect's syntaxes before the first document arrives.
             std::thread::spawn(|| render_markdown("```rust\nfn main() {}\n```".into()));
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Ok(dir) = fsutil::app_dir(&handle) {
+                    providers::migrate_legacy_key(&dir);
+                }
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -308,8 +356,14 @@ pub fn run() {
             ai::ai_complete,
             ai::memory_load,
             ai::memory_save,
-            ai::ai_status,
-            ai::ai_set_key,
+            providers::providers_list,
+            providers::provider_save,
+            providers::provider_delete,
+            providers::provider_set_key,
+            providers::provider_fetch_models,
+            draft_save,
+            draft_delete,
+            drafts_list,
             chats::chats_list,
             chats::chat_load,
             chats::chat_save,

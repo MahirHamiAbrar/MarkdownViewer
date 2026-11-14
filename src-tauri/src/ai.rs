@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -8,17 +7,19 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
-const API_URL: &str = "https://api.commandcode.ai/provider/v1/chat/completions";
-const MODEL: &str = "deepseek/deepseek-v4.1-flash";
-const EFFORTS: [&str; 4] = ["off", "low", "high", "max"];
+use crate::anthropic;
+use crate::fsutil;
+use crate::providers::{self, Provider, ANTHROPIC};
+
 const MAX_REASONING_CHARS: usize = 100_000;
 const MAX_MEMORY_BYTES: usize = 256_000;
 const MAX_TOOLS: usize = 16;
+const MAX_OUTPUT_TOKENS: u64 = 8192;
 
 pub struct AiState {
-    client: reqwest::Client,
+    pub(crate) client: reqwest::Client,
     cancels: Mutex<HashMap<String, Arc<AtomicBool>>>,
 }
 
@@ -33,13 +34,6 @@ impl Default for AiState {
             cancels: Mutex::new(HashMap::new()),
         }
     }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiStatus {
-    pub has_key: bool,
-    pub source: Option<&'static str>,
 }
 
 #[derive(Serialize, Clone)]
@@ -57,7 +51,7 @@ pub struct AiUsage {
     pub input: u64,
     pub output: u64,
     pub reasoning: u64,
-    /// Cost in USD, only when the gateway reports one.
+    /// Cost in USD, only when the provider reports one.
     pub cost: Option<f64>,
 }
 
@@ -68,7 +62,7 @@ pub struct AiTiming {
     pub duration_ms: u64,
 }
 
-#[derive(Serialize, Clone, Default)]
+#[derive(Serialize, Clone, Default, Debug, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiToolCall {
     pub id: String,
@@ -84,6 +78,9 @@ pub struct AiReply {
     pub reasoning: String,
     pub actions: Vec<AiAction>,
     pub tool_calls: Vec<AiToolCall>,
+    /// The assistant turn in the provider's own shape, when a tool round has to hand it
+    /// back unchanged (Anthropic thinking blocks carry a signature). Opaque to the webview.
+    pub provider_blocks: Option<Value>,
     pub stopped: bool,
     pub usage: AiUsage,
     pub timing: AiTiming,
@@ -107,131 +104,11 @@ pub enum AiEvent {
     },
 }
 
-fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .home_dir()
-        .map(|home| home.join(".markdown-viewer-app"))
-        .map_err(|e| e.to_string())
-}
-
-fn config_key(app: &AppHandle) -> Option<String> {
-    let text = std::fs::read_to_string(app_dir(app).ok()?.join("config.json")).ok()?;
-    let value: Value = serde_json::from_str(&text).ok()?;
-    value
-        .get("apiKey")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|key| !key.is_empty())
-        .map(str::to_owned)
-}
-
-fn read_env_key(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let line = line.strip_prefix("export ").unwrap_or(line);
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() != "CMD_API_KEY" {
-            continue;
-        }
-        let value = value.trim().trim_matches(|c| c == '"' || c == '\'');
-        if !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn env_file_key() -> Option<String> {
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            candidates.push(dir.join(".env"));
-        }
-    }
-    #[cfg(debug_assertions)]
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.env"));
-    candidates.into_iter().find_map(|path| read_env_key(&path))
-}
-
-/// env var first, then the key saved from Settings, then a .env file.
-fn resolve_key(app: &AppHandle) -> Result<(String, &'static str), String> {
-    if let Ok(key) = std::env::var("CMD_API_KEY") {
-        let key = key.trim();
-        if !key.is_empty() {
-            return Ok((key.to_string(), "environment"));
-        }
-    }
-    if let Some(key) = config_key(app) {
-        return Ok((key, "config"));
-    }
-    if let Some(key) = env_file_key() {
-        return Ok((key, ".env"));
-    }
-    Err("No Command Code API key is configured. Add one in Settings.".into())
-}
-
-#[tauri::command(async)]
-pub fn ai_status(app: AppHandle) -> AiStatus {
-    match resolve_key(&app) {
-        Ok((_, source)) => AiStatus { has_key: true, source: Some(source) },
-        Err(_) => AiStatus { has_key: false, source: None },
-    }
-}
-
-#[tauri::command(async)]
-pub fn ai_set_key(app: AppHandle, key: Option<String>) -> Result<AiStatus, String> {
-    let dir = app_dir(&app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-
-    let path = dir.join("config.json");
-    let mut config = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .filter(Value::is_object)
-        .unwrap_or_else(|| json!({}));
-
-    match key.map(|k| k.trim().to_string()).filter(|k| !k.is_empty()) {
-        Some(key) => config["apiKey"] = Value::String(key),
-        None => {
-            if let Some(object) = config.as_object_mut() {
-                object.remove("apiKey");
-            }
-        }
-    }
-
-    let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    write_private(&path, &text)?;
-    Ok(ai_status(app))
-}
-
-/// Atomic write, readable by the owner only.
-fn write_private(path: &Path, text: &str) -> Result<(), String> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, path).map_err(|e| e.to_string())
-}
-
 /// What Mark knows about the user: `{ "profile": "...", "items": [{ id, text, createdAt }] }`.
 /// ponytail: one small JSON file, rewritten whole. Move to SQLite if memory ever needs search or grows past a few hundred facts.
 #[tauri::command(async)]
 pub fn memory_load(app: AppHandle) -> String {
-    app_dir(&app)
+    fsutil::app_dir(&app)
         .ok()
         .and_then(|dir| std::fs::read_to_string(dir.join("memory.json")).ok())
         .unwrap_or_else(|| "{}".into())
@@ -246,9 +123,8 @@ pub fn memory_save(app: AppHandle, json: String) -> Result<(), String> {
     if !value.is_object() {
         return Err("Invalid memory JSON: expected an object.".into());
     }
-    let dir = app_dir(&app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    write_private(&dir.join("memory.json"), &json)
+    let dir = fsutil::ensure_app_dir(&app)?;
+    fsutil::atomic_write(&dir.join("memory.json"), json.as_bytes(), true).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -258,12 +134,117 @@ pub fn ai_cancel(state: State<'_, AiState>, request_id: String) {
     }
 }
 
+/// A validated provider + model + key, ready to build a request for.
+struct Route {
+    provider: Provider,
+    model: providers::Model,
+    key: Option<String>,
+}
+
+impl Route {
+    fn resolve(app: &AppHandle, provider: &str, model: &str) -> Result<Self, String> {
+        let dir = fsutil::app_dir(app)?;
+        let provider = providers::find(&dir, provider)?;
+        let model = provider
+            .model(model)
+            .cloned()
+            .ok_or_else(|| format!("{} has no model “{model}”. Pick another model.", provider.display_name()))?;
+        let key = providers::resolve_key(&dir, &provider).map(|(key, _)| key);
+        if key.is_none() && !provider.no_key {
+            return Err(format!("No {} API key is configured. Add one in Settings.", provider.display_name()));
+        }
+        Ok(Self { provider, model, key })
+    }
+
+    fn name(&self) -> &str {
+        self.provider.display_name()
+    }
+
+    /// The wire spelling of an effort level; `Err` for a level this model does not offer.
+    fn effort(&self, level: &str) -> Result<Option<Effort>, String> {
+        let Some(efforts) = self.provider.efforts(&self.model) else {
+            return Ok(None); // no Effort menu: send nothing
+        };
+        let level = if level.is_empty() { self.provider.reasoning.as_deref().unwrap_or("") } else { level };
+        match efforts.get_key_value(level) {
+            Some((level, wire)) => Ok(Some(Effort { level: level.clone(), wire: wire.clone() })),
+            None => Err("Unsupported reasoning effort for this model.".into()),
+        }
+    }
+
+    fn cheapest_effort(&self) -> Option<Effort> {
+        let efforts = self.provider.efforts(&self.model)?;
+        let level = providers::cheapest_effort(efforts)?;
+        Some(Effort { level: level.to_string(), wire: efforts[level].clone() })
+    }
+
+    fn max_tokens(&self) -> u64 {
+        // Anthropic counts thinking against the same budget, so it gets more room.
+        let limit = if self.provider.api == ANTHROPIC { 32_000 } else { MAX_OUTPUT_TOKENS };
+        self.model.max_tokens.map_or(limit, |cap| cap.min(limit))
+    }
+
+    fn post(&self, client: &reqwest::Client, body: &Value) -> reqwest::RequestBuilder {
+        let path = if self.provider.api == ANTHROPIC { "v1/messages" } else { "chat/completions" };
+        providers::authorize(&self.provider, self.key.as_deref(), client.post(self.provider.url(path))).json(body)
+    }
+
+    /// The request body for either protocol. `messages` and `tools` arrive in the
+    /// chat-completions shape the webview builds.
+    fn body(&self, messages: Vec<Value>, tools: Vec<Value>, tool_choice: &str, effort: Option<&Effort>, max_tokens: u64, stream: bool) -> Result<Value, String> {
+        if self.provider.api == ANTHROPIC {
+            return anthropic::body(&self.model.id, messages, tools, tool_choice, effort.and_then(|e| e.wire.as_deref()), max_tokens, stream);
+        }
+        let compat = &self.provider.compat;
+        let messages: Vec<Value> = messages.into_iter().map(strip_provider_blocks).collect();
+        let mut body = json!({ "model": self.model.id, "messages": messages, "stream": stream });
+        body[compat.max_tokens_field.as_deref().unwrap_or("max_tokens")] = json!(max_tokens);
+        if stream {
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+        if let Some(effort) = effort {
+            if compat.thinking_format.as_deref() == Some("deepseek") {
+                body["thinking"] = json!({ "type": if effort.level == "off" { "disabled" } else { "enabled" } });
+            }
+            if let Some(wire) = &effort.wire {
+                if compat.reasoning_format.as_deref() == Some("openrouter") {
+                    body["reasoning"] = json!({ "effort": wire });
+                } else {
+                    body["reasoning_effort"] = json!(wire);
+                }
+            }
+        }
+        if !tools.is_empty() {
+            if compat.tool_choice != Some(false) {
+                body["tools"] = Value::Array(tools);
+                body["tool_choice"] = json!(tool_choice);
+            } else if tool_choice != "none" {
+                body["tools"] = Value::Array(tools);
+            }
+        }
+        Ok(body)
+    }
+}
+
+pub(crate) struct Effort {
+    level: String,
+    wire: Option<String>,
+}
+
+fn strip_provider_blocks(mut message: Value) -> Value {
+    if let Some(object) = message.as_object_mut() {
+        object.remove("provider_blocks");
+    }
+    message
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)] // one argument per field of the webview call
 pub async fn ai_chat(
     app: AppHandle,
     state: State<'_, AiState>,
     request_id: String,
+    provider: String,
     model: String,
     effort: String,
     messages: Vec<Value>,
@@ -279,58 +260,51 @@ pub async fn ai_chat(
     if !["auto", "none"].contains(&tool_choice.as_str()) {
         return Err("Unsupported tool choice.".into());
     }
-    if model != MODEL {
-        return Err("Unsupported model.".into());
-    }
-    if !EFFORTS.contains(&effort.as_str()) {
-        return Err("Unsupported reasoning effort.".into());
-    }
     if request_id.is_empty() || request_id.len() > 80 {
         return Err("Invalid request id.".into());
     }
     if messages.is_empty() {
         return Err("No messages to send.".into());
     }
+    let route = Route::resolve(&app, &provider, &model)?;
+    let effort = route.effort(&effort)?;
+    let body = route.body(messages, tools, &tool_choice, effort.as_ref(), route.max_tokens(), true)?;
 
-    let (key, _) = resolve_key(&app)?;
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancels.lock().unwrap().insert(request_id.clone(), cancel.clone());
-    let mut body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-        "stream_options": { "include_usage": true },
-        "max_tokens": 8192,
-        "reasoning_effort": effort,
-    });
-    if !tools.is_empty() {
-        body["tools"] = Value::Array(tools);
-        body["tool_choice"] = Value::String(tool_choice);
-    }
-    let result = stream_chat(&state.client, &key, &body, &cancel, &on_event).await;
+    let request = route.post(&state.client, &body);
+    let result = if route.provider.api == ANTHROPIC {
+        stream_chat(request, anthropic::Parser::default(), route.name(), &cancel, &on_event).await
+    } else {
+        stream_chat(request, OpenAiParser::default(), route.name(), &cancel, &on_event).await
+    };
     state.cancels.lock().unwrap().remove(&request_id);
     result
 }
 
-async fn stream_chat(
-    client: &reqwest::Client,
-    key: &str,
-    body: &Value,
+/// One provider's server-sent events, turned into the items the chat loop understands.
+pub(crate) trait Protocol: Default {
+    fn payload(&mut self, payload: &str, out: &mut Vec<StreamItem>);
+    fn tool_calls(&self) -> Vec<AiToolCall>;
+    /// Called once the stream ends: an error the stream itself reported, or the turn to hand back.
+    fn finish(&mut self, _content: &str) -> Result<Option<Value>, String> {
+        Ok(None)
+    }
+}
+
+async fn stream_chat<P: Protocol>(
+    request: reqwest::RequestBuilder,
+    protocol: P,
+    name: &str,
     cancel: &AtomicBool,
     on_event: &Channel<AiEvent>,
 ) -> Result<AiReply, String> {
     let started = Instant::now();
-    let response = client
-        .post(API_URL)
-        .bearer_auth(key)
-        .json(body)
-        .send()
-        .await
-        .map_err(|e| network_error(&e))?;
+    let response = request.send().await.map_err(|e| network_error(&e, name))?;
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        return Err(http_error(status.as_u16(), &body));
+        return Err(http_error(status.as_u16(), &body, name));
     }
     // Some gateways report the request cost on a header; keep it as a fallback.
     let header_cost = response.headers().iter().find_map(|(name, value)| {
@@ -342,7 +316,7 @@ async fn stream_chat(
 
     let mut reply = AiReply::default();
     let mut usage = AiUsage::default();
-    let mut parser = SseParser::default();
+    let mut parser = SseParser { buf: Vec::new(), protocol };
     let mut first_token_ms = 0u64;
     let mut phase = String::new();
 
@@ -352,12 +326,12 @@ async fn stream_chat(
             reply.stopped = true;
             break;
         }
-        let chunk = chunk.map_err(|e| network_error(&e))?;
+        let chunk = chunk.map_err(|e| network_error(&e, name))?;
         for item in parser.feed(&chunk) {
             apply_stream_item(item, &mut reply, &mut usage, &mut first_token_ms, &mut phase, started, header_cost, on_event);
         }
     }
-    // A stream may end right after [DONE] without a trailing newline.
+    // A stream may end right after its last event without a trailing newline.
     for item in parser.finish() {
         apply_stream_item(item, &mut reply, &mut usage, &mut first_token_ms, &mut phase, started, header_cost, on_event);
     }
@@ -375,7 +349,8 @@ async fn stream_chat(
     }
     // A stopped stream may hold half-written arguments; never hand those out to be run.
     if !reply.stopped {
-        reply.tool_calls = parser.tool_calls();
+        reply.provider_blocks = parser.protocol.finish(&reply.content).map_err(|e| format!("{name}: {e}"))?;
+        reply.tool_calls = parser.protocol.tool_calls();
     }
     let _ = on_event.send(AiEvent::Done {
         input_tokens: usage.input,
@@ -388,6 +363,7 @@ async fn stream_chat(
     Ok(reply)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_stream_item(
     item: StreamItem,
     reply: &mut AiReply,
@@ -442,47 +418,42 @@ fn apply_stream_item(
 pub async fn ai_complete(
     app: AppHandle,
     state: State<'_, AiState>,
+    provider: String,
     model: String,
     messages: Vec<Value>,
     max_tokens: u32,
 ) -> Result<String, String> {
-    if model != MODEL {
-        return Err("Unsupported model.".into());
+    let route = Route::resolve(&app, &provider, &model)?;
+    let effort = route.cheapest_effort();
+    let mut max_tokens = u64::from(max_tokens.clamp(1, 1200));
+    // Thinking that cannot be switched off shares the output budget; leave it room.
+    if effort.as_ref().is_some_and(|effort| effort.level != "off") {
+        max_tokens += 4000;
     }
-    let (key, _) = resolve_key(&app)?;
-    let body = json!({
-        "model": model,
-        "messages": messages,
-        "stream": false,
-        "max_tokens": max_tokens.clamp(1, 1200),
-        "reasoning_effort": "off",
-    });
-    let response = state
-        .client
-        .post(API_URL)
-        .bearer_auth(key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| network_error(&e))?;
+    let body = route.body(messages, Vec::new(), "none", effort.as_ref(), max_tokens, false)?;
+    let response = route.post(&state.client, &body).send().await.map_err(|e| network_error(&e, route.name()))?;
     let status = response.status();
     let text = response.text().await.map_err(|e| e.to_string())?;
     if !status.is_success() {
-        return Err(http_error(status.as_u16(), &text));
+        return Err(http_error(status.as_u16(), &text, route.name()));
     }
     let value: Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let text = value
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+    let text = if route.provider.api == ANTHROPIC {
+        anthropic::reply_text(&value)
+    } else {
+        value
+            .get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
     if text.is_empty() {
-        return Err("The gateway returned an empty reply.".into());
+        return Err(format!("{} returned an empty reply.", route.name()));
     }
     Ok(text)
 }
@@ -503,7 +474,7 @@ fn push_capped(target: &mut String, text: &str, cap: usize) {
     target.push_str(&text[..end]);
 }
 
-fn http_error(status: u16, body: &str) -> String {
+pub(crate) fn http_error(status: u16, body: &str, name: &str) -> String {
     let message = serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|value| {
@@ -515,24 +486,25 @@ fn http_error(status: u16, body: &str) -> String {
         .filter(|message| !message.is_empty())
         .unwrap_or_else(|| body.chars().take(240).collect::<String>().trim().to_string());
     let hint = match status {
-        401 => "Your Command Code API key was rejected. Check it in Settings.",
-        403 => "This Command Code account can't use the API. Check your plan or key.",
-        429 => "Mark is rate-limited right now. Try again in a moment.",
-        502 | 503 | 504 => "Command Code is temporarily unavailable. Try again shortly.",
-        _ => "",
+        401 => format!("Your {name} API key was rejected. Check it in Settings."),
+        429 => format!("{name} is rate-limiting requests right now. Try again in a moment."),
+        502..=504 | 529 => format!("{name} is temporarily unavailable. Try again shortly."),
+        _ => String::new(),
     };
     match (hint.is_empty(), message.is_empty()) {
         (false, _) => format!("{hint} ({status})"),
-        (true, false) => format!("Command Code error ({status}): {message}"),
-        (true, true) => format!("Command Code error ({status})."),
+        (true, false) => format!("{name} error ({status}): {message}"),
+        (true, true) => format!("{name} error ({status})."),
     }
 }
 
-fn network_error(error: &reqwest::Error) -> String {
+pub(crate) fn network_error(error: &reqwest::Error, name: &str) -> String {
     if error.is_timeout() {
-        "Mark took too long to respond. Check your connection and try again.".into()
+        format!("{name} took too long to respond. Check your connection and try again.")
+    } else if error.is_connect() {
+        format!("Couldn't connect to {name}. Check that it is running and reachable.")
     } else {
-        "Couldn't reach Command Code. Check your connection and try again.".into()
+        format!("Couldn't reach {name}. Check your connection and try again.")
     }
 }
 
@@ -568,7 +540,7 @@ fn usage_cost(usage: &Value, root: &Value) -> Option<f64> {
 }
 
 #[derive(Debug, PartialEq)]
-enum StreamItem {
+pub(crate) enum StreamItem {
     Content(String),
     Reasoning(String),
     Action { id: String, name: String, detail: String },
@@ -587,26 +559,49 @@ fn tool_id(index: usize, call: &ToolCall) -> String {
     if call.id.is_empty() { format!("tool-{index}") } else { call.id.clone() }
 }
 
+/// Splits a byte stream into `data:` payloads and hands each to the protocol.
 #[derive(Default)]
-struct SseParser {
+pub(crate) struct SseParser<P: Protocol> {
     buf: Vec<u8>,
-    tools: HashMap<usize, ToolCall>,
+    pub(crate) protocol: P,
 }
 
-impl SseParser {
-    fn feed(&mut self, chunk: &[u8]) -> Vec<StreamItem> {
+impl<P: Protocol> SseParser<P> {
+    pub(crate) fn feed(&mut self, chunk: &[u8]) -> Vec<StreamItem> {
         self.buf.extend_from_slice(chunk);
         let mut out = Vec::new();
         while let Some(at) = self.buf.iter().position(|&b| b == b'\n') {
             let line: Vec<u8> = self.buf.drain(..=at).collect();
             let line = String::from_utf8_lossy(&line);
             if let Some(payload) = line.trim_end().strip_prefix("data:") {
-                self.payload(payload.trim(), &mut out);
+                self.protocol.payload(payload.trim(), &mut out);
             }
         }
         out
     }
 
+    /// Flush a final line that arrived without its trailing newline.
+    pub(crate) fn finish(&mut self) -> Vec<StreamItem> {
+        let mut out = Vec::new();
+        if self.buf.is_empty() {
+            return out;
+        }
+        let line: Vec<u8> = self.buf.drain(..).collect();
+        let line = String::from_utf8_lossy(&line);
+        if let Some(payload) = line.trim_end().strip_prefix("data:") {
+            self.protocol.payload(payload.trim(), &mut out);
+        }
+        out
+    }
+}
+
+/// Chat-completions streaming (`openai-completions`).
+#[derive(Default)]
+struct OpenAiParser {
+    tools: HashMap<usize, ToolCall>,
+}
+
+impl Protocol for OpenAiParser {
     fn tool_calls(&self) -> Vec<AiToolCall> {
         let mut indexes: Vec<_> = self.tools.keys().copied().collect();
         indexes.sort_unstable();
@@ -620,20 +615,6 @@ impl SseParser {
                 arguments: call.arguments.clone(),
             })
             .collect()
-    }
-
-    /// Flush a final line that arrived without its trailing newline.
-    fn finish(&mut self) -> Vec<StreamItem> {
-        let mut out = Vec::new();
-        if self.buf.is_empty() {
-            return out;
-        }
-        let line: Vec<u8> = self.buf.drain(..).collect();
-        let line = String::from_utf8_lossy(&line);
-        if let Some(payload) = line.trim_end().strip_prefix("data:") {
-            self.payload(payload.trim(), &mut out);
-        }
-        out
     }
 
     fn payload(&mut self, payload: &str, out: &mut Vec<StreamItem>) {
@@ -712,7 +693,7 @@ mod tests {
 
     #[test]
     fn parses_reasoning_content_across_chunks() {
-        let mut parser = SseParser::default();
+        let mut parser = SseParser::<OpenAiParser>::default();
         assert!(parser.feed(br#"data: {"choices":[{"delta":{"reasoni"#).is_empty());
         let items = parser.feed(b"ng_content\":\"think\"}}]}\n\n");
         assert_eq!(items, vec![StreamItem::Reasoning("think".into())]);
@@ -723,7 +704,7 @@ mod tests {
 
     #[test]
     fn parses_usage_and_tool_calls() {
-        let mut parser = SseParser::default();
+        let mut parser = SseParser::<OpenAiParser>::default();
         let mut items = parser.feed(
             br#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"search","arguments":"query"}}]}}]}
 data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":" more"}}]}}]}
@@ -744,7 +725,7 @@ data: [DONE]"#,
             _ => None,
         });
         assert_eq!(usage, Some((10, 4, 2, Some(0.00042))));
-        let calls = parser.tool_calls();
+        let calls = parser.protocol.tool_calls();
         assert_eq!(calls.len(), 1);
         assert_eq!((calls[0].id.as_str(), calls[0].name.as_str(), calls[0].arguments.as_str()), ("call_1", "search", "query more"));
         assert!(items.contains(&StreamItem::Done));
@@ -752,7 +733,7 @@ data: [DONE]"#,
 
     #[test]
     fn parses_cost_variants_without_choices() {
-        let mut parser = SseParser::default();
+        let mut parser = SseParser::<OpenAiParser>::default();
         let items = parser.feed(
             b"data: {\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":2,\"total_cost\":\"$0.0012\"}}\n",
         );
@@ -761,15 +742,56 @@ data: [DONE]"#,
         assert_eq!(parse_cost("nope"), None);
     }
 
+    fn test_route(id: &str, model: providers::Model) -> Route {
+        let dir = std::env::temp_dir().join(format!("mdeditor-route-{}", std::process::id()));
+        let mut provider = providers::find(&dir, id).unwrap();
+        provider.models = vec![model.clone()];
+        Route { provider, model, key: None }
+    }
+
     #[test]
-    fn reads_env_key_variants() {
-        let path = std::env::temp_dir().join(format!("mdviewer-env-{}", std::process::id()));
-        std::fs::write(&path, "# comment\nOTHER=x\nexport CMD_API_KEY = \"user_abc\"\n").unwrap();
-        assert_eq!(read_env_key(&path).as_deref(), Some("user_abc"));
-        std::fs::write(&path, "CMD_API_KEY=user_plain\r\n").unwrap();
-        assert_eq!(read_env_key(&path).as_deref(), Some("user_plain"));
-        std::fs::write(&path, "CMD_API_KEY=\n").unwrap();
-        assert_eq!(read_env_key(&path), None);
-        let _ = std::fs::remove_file(path);
+    fn builds_bodies_per_provider() {
+        let model = |id: &str| providers::Model { id: id.into(), ..Default::default() };
+        let messages = || vec![json!({ "role": "user", "content": "hi", "provider_blocks": [] })];
+        let tools = || vec![json!({ "type": "function", "function": { "name": "t", "parameters": {} } })];
+
+        let deepseek = test_route("deepseek", model("deepseek-flash"));
+        let off = deepseek.effort("off").unwrap();
+        let body = deepseek.body(messages(), tools(), "auto", off.as_ref(), 100, true).unwrap();
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body["messages"][0].get("provider_blocks").is_none());
+        assert_eq!((&body["max_tokens"], &body["tool_choice"]), (&json!(100), &json!("auto")));
+        let high = deepseek.effort("").unwrap(); // the route's default
+        let body = deepseek.body(messages(), vec![], "auto", high.as_ref(), 100, false).unwrap();
+        assert_eq!((&body["thinking"]["type"], &body["reasoning_effort"]), (&json!("enabled"), &json!("high")));
+        assert!(body.get("stream_options").is_none() && body.get("tools").is_none());
+        assert!(deepseek.effort("xhigh").is_err());
+
+        let openai = test_route("openai", model("gpt-x"));
+        let auto = openai.effort("auto").unwrap();
+        let body = openai.body(messages(), vec![], "auto", auto.as_ref(), 100, true).unwrap();
+        assert!(body.get("reasoning_effort").is_none() && body.get("max_tokens").is_none());
+        assert_eq!(body["max_completion_tokens"], 100);
+
+        let openrouter = test_route("openrouter", model("x/y"));
+        let low = openrouter.effort("low").unwrap();
+        assert_eq!(openrouter.body(messages(), vec![], "auto", low.as_ref(), 1, true).unwrap()["reasoning"]["effort"], "low");
+
+        // Ollama has no Effort menu and rejects tool_choice: the last round drops the tools instead.
+        let ollama = test_route("ollama", model("llama3"));
+        assert!(ollama.effort("high").unwrap().is_none());
+        let body = ollama.body(messages(), tools(), "auto", None, 1, true).unwrap();
+        assert!(body.get("tools").is_some() && body.get("tool_choice").is_none());
+        assert!(ollama.body(messages(), tools(), "none", None, 1, true).unwrap().get("tools").is_none());
+        assert_eq!(ollama.post(&reqwest::Client::new(), &body).build().unwrap().url().as_str(), "http://localhost:11434/v1/chat/completions");
+
+        let mut claude = model("claude-x");
+        claude.reasoning_efforts = Some([("high".to_string(), Some("high".to_string()))].into());
+        let anthropic = test_route("anthropic", claude);
+        let request = anthropic.post(&reqwest::Client::new(), &json!({})).build().unwrap();
+        assert_eq!(request.url().as_str(), "https://api.anthropic.com/v1/messages");
+        assert_eq!(request.headers()["anthropic-version"], providers::ANTHROPIC_VERSION);
+        assert!(http_error(401, "{}", "OpenAI").contains("OpenAI API key"));
     }
 }
