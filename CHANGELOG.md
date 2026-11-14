@@ -24,6 +24,7 @@ All notable changes to MarkdownEditor are listed here. The format follows
 - API keys are stored in the system keychain instead of `config.json`. An existing key is moved
   on first start.
 - Saving a document is atomic: a crash while saving leaves the previous file intact.
+- Releases are published on GitHub, signed with GPG, with checksums and build provenance.
 
 ## [0.1.0]
 

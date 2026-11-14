@@ -123,8 +123,9 @@ chat, and a **Memory** switch. With memory on, Mark saves lasting facts and pref
 
 ## Download & install (Linux)
 
-Every `v*` tag is built by the [CI pipeline](.gitlab-ci.yml) and published on the
-[Releases page](../../releases) — download a package and install it directly, no build required:
+Download the latest package from the
+[Releases page](https://github.com/MahirHamiAbrar/MarkdownViewer/releases/latest); no build
+required:
 
 - **`MarkdownEditor_<version>_amd64.deb`** — Debian, Ubuntu, and derivatives
 - **`MarkdownEditor_<version>_amd64.AppImage`** — any other distribution with a desktop
@@ -138,7 +139,28 @@ chmod +x MarkdownEditor_<version>_amd64.AppImage
 ./MarkdownEditor_<version>_amd64.AppImage
 ```
 
-Both come with a desktop entry and Markdown file associations.
+Both come with a desktop entry and Markdown file associations. Windows and macOS have no
+released binaries yet; see [docs/BUILDING.md](docs/BUILDING.md) to build your own.
+
+### Verify your download
+
+Every release file is signed, and the release carries a signed `SHA256SUMS`.
+
+```sh
+# 1. Import the project's public key (once)
+curl -fsSL https://raw.githubusercontent.com/MahirHamiAbrar/MarkdownViewer/main/docs/signing-key.asc | gpg --import
+
+# 2. Check the checksum list, then the file against it
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+With the [GitHub CLI](https://cli.github.com) you can also confirm a file was built by this
+repository's release workflow:
+
+```sh
+gh attestation verify MarkdownEditor_<version>_amd64.deb --repo MahirHamiAbrar/MarkdownViewer
+```
 
 ### Build from source
 
@@ -177,8 +199,9 @@ node --check src/main.js
 node src/mdsource.js
 ```
 
-CI runs the tests on every push and, on a `v*` tag, builds the `.deb` and `.AppImage` and
-publishes them on the [Releases page](../../releases).
+CI ([`.github/workflows`](.github/workflows)) runs the tests on every push and pull request.
+A `v*` tag builds, signs and publishes the `.deb` and `.AppImage`. See
+[CONTRIBUTING.md](CONTRIBUTING.md) to get involved and [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 ## Architecture
 
