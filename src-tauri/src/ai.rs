@@ -586,7 +586,7 @@ impl<P: Protocol> SseParser<P> {
         if self.buf.is_empty() {
             return out;
         }
-        let line: Vec<u8> = self.buf.drain(..).collect();
+        let line: Vec<u8> = std::mem::take(&mut self.buf);
         let line = String::from_utf8_lossy(&line);
         if let Some(payload) = line.trim_end().strip_prefix("data:") {
             self.protocol.payload(payload.trim(), &mut out);
