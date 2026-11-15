@@ -167,6 +167,25 @@ chat, and a **Memory** switch. With memory on, Big Brain saves lasting facts and
 
 ## Download & install
 
+### One command
+
+```sh
+# Linux and macOS
+curl -fsSL https://raw.githubusercontent.com/MahirHamiAbrar/MarkdownViewer/main/scripts/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/MahirHamiAbrar/MarkdownViewer/main/scripts/install.ps1 | iex
+```
+
+Each installs the latest release and checks it against the release's `SHA256SUMS`. On Debian
+and Ubuntu it installs the `.deb` with apt (asks for sudo); on other Linux distributions it puts
+the AppImage in `~/.local/bin` with a desktop entry; on macOS it copies the app to
+`/Applications`; on Windows it runs the installer for the current user.
+
+### Manual download
+
 Download the latest package from the
 [Releases page](https://github.com/MahirHamiAbrar/MarkdownViewer/releases/latest); no build
 required:
@@ -277,3 +296,4 @@ A `v*` tag builds, signs and publishes the `.deb` and `.AppImage`. See
   listing, and PDF export commands, plus private web search (`web_search.rs`:
   Google/Bing/DuckDuckGo/Mojeek/SearXNG through proxy/Tor with retries) and highlights (`highlights.rs`)
 - `install.sh` — build + Linux desktop integration (desktop file, icons, MIME defaults)
+- `scripts/install.sh`, `scripts/install.ps1` — one-command installers for the latest release

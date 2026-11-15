@@ -55,6 +55,7 @@ jobs:
           node src/markctx.js
           node src/pdfctx.js
           bash -n install.sh
+          sh -n scripts/install.sh
       - name: Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
       - name: Clippy
