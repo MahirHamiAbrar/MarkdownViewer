@@ -9,7 +9,6 @@ use comrak::adapters::SyntaxHighlighterAdapter;
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use comrak::options::Plugins;
 use comrak::{markdown_to_html_with_plugins, Options};
-use serde::Serialize;
 use tauri::{Emitter, Manager};
 
 mod ai;
@@ -18,6 +17,7 @@ mod chats;
 mod cli;
 mod fsutil;
 mod providers;
+mod workspace;
 
 /// Syntect is the slowest step of a render; the preview re-renders on every edit, so
 /// unchanged code blocks reuse their highlighted HTML.
@@ -73,10 +73,6 @@ static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         .link_rel(None);
     b
 });
-
-// Markdown, plus the formats the app exports and can show in its viewer.
-const OPEN_EXTENSIONS: [&str; 6] = ["md", "markdown", "mdx", "pdf", "html", "htm"];
-const SKIP_DIRS: [&str; 3] = ["node_modules", "target", "dist"];
 
 fn options() -> Options<'static> {
     let mut o = Options::default();
@@ -299,111 +295,6 @@ fn list_fonts() -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[derive(Serialize, Debug)]
-struct TreeNode {
-    name: String,
-    path: String,
-    children: Option<Vec<TreeNode>>, // None = file
-}
-
-fn is_openable(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| OPEN_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-}
-
-// ponytail: depth 8 / 5000 files cap keeps huge trees responsive; lazy-load per folder if users need more.
-fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Vec<TreeNode> {
-    let Ok(entries) = fs::read_dir(dir) else { return vec![] };
-    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-    entries.sort_by_key(|p| (!p.is_dir(), p.file_name().map(|n| n.to_ascii_lowercase())));
-    let mut out = vec![];
-    for p in entries {
-        if *budget == 0 {
-            break;
-        }
-        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if p.is_dir() {
-            if depth == 0 || SKIP_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            let children = walk(&p, depth - 1, budget);
-            if !children.is_empty() {
-                out.push(TreeNode { name, path: p.to_string_lossy().into_owned(), children: Some(children) });
-            }
-        } else if is_openable(&p) {
-            *budget -= 1;
-            out.push(TreeNode { name, path: p.to_string_lossy().into_owned(), children: None });
-        }
-    }
-    out
-}
-
-#[tauri::command(async)]
-fn list_markdown(dir: String) -> Vec<TreeNode> {
-    walk(Path::new(&dir), 8, &mut 5000)
-}
-
-#[derive(Serialize, Debug)]
-struct Hit {
-    path: String,
-    line: usize,
-    text: String,
-}
-
-fn snippet(line: &str, at: usize, len: usize) -> String {
-    let start = line[..at].char_indices().rev().nth(40).map_or(0, |(i, _)| i);
-    let end = line[at + len..].char_indices().nth(80).map_or(line.len(), |(i, _)| at + len + i);
-    let mut s = line[start..end].trim().to_string();
-    if start > 0 {
-        s.insert(0, '…');
-    }
-    if end < line.len() {
-        s.push('…');
-    }
-    s
-}
-
-#[tauri::command(async)]
-fn search_files(paths: Vec<String>, query: String) -> Vec<Hit> {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
-        return vec![];
-    }
-    let mut hits = vec![];
-    let mut seen = HashSet::new();
-    for path in paths {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        if fs::metadata(&path).map_or(true, |m| m.len() > 2_000_000) {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        let mut per_file = 0;
-        for (i, line) in text.lines().enumerate() {
-            let lower = line.to_lowercase();
-            // Lowercasing can change byte lengths for some scripts; only slice when lengths agree.
-            if let Some(at) = lower.find(&q) {
-                let text = if lower.len() == line.len() { snippet(line, at, q.len()) } else { line.trim().to_string() };
-                hits.push(Hit { path: path.clone(), line: i + 1, text });
-                per_file += 1;
-                if per_file == 5 {
-                    break;
-                }
-            }
-        }
-        if hits.len() >= 200 {
-            hits.truncate(200);
-            break;
-        }
-    }
-    hits
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -461,8 +352,8 @@ pub fn run() {
             read_bytes,
             export_pdf,
             new_window,
-            list_markdown,
-            search_files,
+            workspace::list_workspace,
+            workspace::search_files,
             list_fonts,
             ai::ai_chat,
             ai::ai_cancel,
@@ -521,26 +412,5 @@ mod tests {
         assert_eq!(font_families("Noto Sans\ninter\n\nNoto Sans\nArial\n"), ["Arial", "inter", "Noto Sans"]);
         let html = render_markdown("```rust\nfn a() {}\n```".into());
         assert_eq!(html, render_markdown("```rust\nfn a() {}\n```".into()), "cached highlight matches");
-    }
-
-    #[test]
-    fn tree_and_search() {
-        let root = std::env::temp_dir().join(format!("mdviewer-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("docs")).unwrap();
-        fs::create_dir_all(root.join("empty")).unwrap();
-        fs::write(root.join("docs/Guide.md"), "intro\nThe Quick fox\n").unwrap();
-        fs::write(root.join("notes.txt"), "x").unwrap();
-
-        let tree = list_markdown(root.to_string_lossy().into());
-        assert_eq!(tree.len(), 1, "{tree:?}");
-        assert_eq!(tree[0].name, "docs");
-
-        let file = root.join("docs/Guide.md").to_string_lossy().into_owned();
-        let hits = search_files(vec![file], "quick".into());
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].line, 2);
-        assert_eq!(hits[0].text, "The Quick fox");
-        fs::remove_dir_all(root).unwrap();
     }
 }

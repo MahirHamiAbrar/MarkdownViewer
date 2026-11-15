@@ -7,6 +7,8 @@ const opener = window.__TAURI__.opener;
 const tpath = window.__TAURI__.path; // only for homeDir at boot: per-render IPC calls add latency
 const appWindow = window.__TAURI__.window.getCurrentWindow();
 const webview = window.__TAURI__.webview.getCurrentWebview();
+// Only the first window remembers its session; a window opened later shows what it was opened for.
+const IS_MAIN = appWindow.label === "main";
 
 // App elements are looked up by class, never id: rendered headings carry ids of their own.
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -26,6 +28,7 @@ const el = {
   sbList: $(".sb-list"),
   welcome: $(".welcome"),
   welcomeList: $(".welcome .history-list"),
+  welcomeWorkspaces: $(".welcome-workspaces"),
   welcomeEmpty: $(".welcome .history-empty"),
   history: $(".history"),
   historyList: $(".history .history-list"),
@@ -144,8 +147,11 @@ const state = {
   view: null,       // "pdf" | "html" when the open file is shown in the viewer frame instead
   mode: store.get("mode", "read"),
   recents: store.get("recents", []),
-  folder: store.get("folder", null),
-  tree: [],
+  // What this window has open: folders (each a tree in the sidebar) and loose files outside them.
+  workspace: IS_MAIN
+    ? store.get("workspace", null) || { folders: [store.get("folder", null)].filter(Boolean), files: [] } // "folder": the single folder of older versions
+    : { folders: [], files: [] },
+  roots: [],        // per folder, from list_workspace: { path, tree, files, truncated }
   expanded: new Set(),
   settings: { ...DEFAULT_SETTINGS, ...store.get("settings", {}) },
   home: "",
@@ -485,6 +491,7 @@ async function openFile(p, { fragment = null, find: query = null, line = null, q
   resetHistory();
   addRecent(p);
   store.set("lastFile", p);
+  addLooseFile(p);
   revealInTree(p);
   showDoc();
   if (view) return showViewer(view, p, bytes);
@@ -528,6 +535,7 @@ async function saveAs() {
   clearDraft();
   addRecent(path);
   store.set("lastFile", path);
+  addLooseFile(path);
   revealInTree(path);
   renderSrc = null; // relative images now resolve against the new file's folder
   renderPreview();
@@ -577,7 +585,7 @@ function gotoLine(line) {
 
 /** Opens what a launch, a later `markdowneditor <path>`, or a drop asked for. Resolves true once a document is shown. */
 async function handleOpenRequest(req) {
-  for (const dir of req.folders) await setFolder(dir);
+  if (req.folders.length) await addFolders(req.folders);
   // ponytail: one document per window, so the first openable file wins; open them all once tabs exist.
   const file = req.files.find((f) => canOpen(f.path));
   if (!file) {
@@ -608,31 +616,101 @@ async function pickFile() {
 }
 
 async function pickFolder() {
-  const p = await dialog.open({ directory: true, multiple: false });
-  if (p) setFolder(p);
+  const picked = await dialog.open({ directory: true, multiple: true });
+  if (picked?.length) addFolders(picked);
 }
 
-async function setFolder(p) {
-  state.folder = p;
-  store.set("folder", p);
+// ---------- workspace: the folders and loose files this window has open ----------
+const MAX_RECENT_WORKSPACES = 10;
+
+function saveWorkspace() {
+  if (IS_MAIN) store.set("workspace", state.workspace);
+}
+
+/** The workspace folder `p` lives in (the innermost, when folders nest), or null for a loose file. */
+function rootOf(p) {
+  return state.workspace.folders
+    .filter((dir) => p.startsWith(dir) && /[\\/]/.test(p[dir.length] || ""))
+    .sort((a, b) => b.length - a.length)[0] || null;
+}
+
+async function addFolders(dirs) {
+  const added = dirs.filter((dir) => !state.workspace.folders.includes(dir));
+  if (!added.length) return;
+  state.workspace.folders.push(...added);
+  for (const dir of added) state.expanded.add(dir);
+  state.workspace.files = state.workspace.files.filter((p) => !rootOf(p)); // a loose file inside a folder now belongs to it
+  saveWorkspace();
+  const recent = store.get("recentWorkspaces", []).filter((folders) => folders.join("\n") !== state.workspace.folders.join("\n"));
+  store.set("recentWorkspaces", [[...state.workspace.folders], ...recent].slice(0, MAX_RECENT_WORKSPACES));
   await loadTree();
 }
 
-async function loadTree() {
-  state.tree = state.folder ? await invoke("list_markdown", { dir: state.folder }) : [];
+function removeFolder(dir) {
+  state.workspace.folders = state.workspace.folders.filter((d) => d !== dir);
+  state.roots = state.roots.filter((root) => root.path !== dir);
+  saveWorkspace();
+  renderSidebar();
+}
+
+function addLooseFile(p) {
+  if (rootOf(p) || state.workspace.files.includes(p)) return;
+  state.workspace.files.push(p);
+  saveWorkspace();
+}
+
+function removeLooseFile(p) {
+  state.workspace.files = state.workspace.files.filter((f) => f !== p);
+  saveWorkspace();
+  renderSidebar();
+}
+
+async function setWorkspace(folders) {
+  state.workspace = { folders: [], files: [] };
+  state.roots = [];
+  saveWorkspace();
+  renderSidebar();
+  await addFolders(folders);
+}
+
+/** Re-lists every folder. `ifChanged` leaves the sidebar alone when nothing moved on disk. */
+async function loadTree({ ifChanged = false } = {}) {
+  const folders = [...state.workspace.folders];
+  const roots = folders.length ? await invoke("list_workspace", { folders }) : [];
+  if (folders.join("\n") !== state.workspace.folders.join("\n")) return; // folders changed meanwhile: that newer listing wins
+  if (ifChanged && JSON.stringify(roots) === JSON.stringify(state.roots)) return;
+  state.roots = roots;
   if (state.path) revealInTree(state.path);
   renderSidebar();
 }
 
-function folderFiles(nodes = state.tree, out = []) {
-  for (const n of nodes) n.children ? folderFiles(n.children, out) : out.push(n.path);
-  return out;
+/** Files of the workspace. `openable` keeps only what the app can show (Markdown, PDF, HTML). */
+function workspaceFiles({ openable = false } = {}) {
+  const out = new Set();
+  const walk = (nodes) => { for (const n of nodes) n.children ? walk(n.children) : out.add(n.path); };
+  for (const root of state.roots) {
+    walk(root.tree);
+    if (!openable) for (const file of root.files) out.add(file);
+  }
+  for (const file of state.workspace.files) if (!openable || canOpen(file)) out.add(file);
+  return [...out];
+}
+
+/** A short path for lists and for Big Brain: relative to its folder, named after the folder when there are several. */
+// ponytail: two folders or two loose files with the same name can share a display path; add more of the path if that bites.
+function displayPath(p) {
+  const root = rootOf(p);
+  if (!root) return state.workspace.files.includes(p) ? baseName(p) : p;
+  const rel = p.slice(root.length + 1);
+  return state.workspace.folders.length > 1 ? `${baseName(root)}/${rel}` : rel;
 }
 
 function revealInTree(p) {
-  if (!state.folder || !p.startsWith(state.folder)) return;
+  const root = rootOf(p);
+  if (!root) return;
+  state.expanded.add(root);
   let d = dirName(p);
-  while (d.length > state.folder.length) { state.expanded.add(d); d = dirName(d); }
+  while (d.length > root.length) { state.expanded.add(d); d = dirName(d); }
 }
 
 // ---------- rendering ----------
@@ -1485,12 +1563,30 @@ function renderSidebar() {
         extra: `<span class="nav-remove" data-remove="${escapeHtml(p)}" role="button" aria-label="Remove from recent" data-tip="Remove from list">${svg("x")}</span>`,
       })).join("")
     : `<div class="sb-empty">Files you open will appear here.</div>`;
-  if (state.folder) {
-    html += `<div class="group-label"><span title="${escapeHtml(state.folder)}">${escapeHtml(baseName(state.folder))}</span>
-      <button class="icon-btn" data-action="refresh-folder" data-tip="Refresh" aria-label="Refresh folder">${svg("refresh")}</button>
-      <button class="icon-btn" data-action="close-folder" data-tip="Close folder" aria-label="Close folder">${svg("x")}</button></div>`;
-    html += state.tree.length ? `<div role="tree">${treeHtml(state.tree, 0)}</div>` : `<div class="sb-empty">No Markdown, PDF or HTML files in this folder.</div>`;
+  const { folders, files } = state.workspace;
+  if (folders.length || files.length) {
+    html += `<div class="group-label"><span>Workspace</span>
+      <button class="icon-btn" data-action="open-folder" data-tip="Add folder" aria-label="Add folder to workspace">${svg("folder-plus")}</button>
+      <button class="icon-btn" data-action="refresh-folder" data-tip="Refresh" aria-label="Refresh workspace">${svg("refresh")}</button>
+      <button class="icon-btn" data-action="close-folder" data-tip="Close workspace" aria-label="Close workspace">${svg("x")}</button></div>`;
   }
+  if (folders.length) {
+    html += `<div role="tree">${folders.map((dir) => {
+      const open = state.expanded.has(dir);
+      const root = state.roots.find((r) => r.path === dir);
+      const body = !open ? "" : root?.tree.length ? treeHtml(root.tree, 1)
+        : `<div class="sb-empty">${root ? "No Markdown, PDF or HTML files in this folder." : "Reading folder…"}</div>`;
+      return `<div class="nav-item tree-item" role="treeitem" tabindex="0" data-dir="${escapeHtml(dir)}" aria-expanded="${open}" style="padding-left:8px" title="${escapeHtml(dir)}">
+        <svg class="chev"><use href="#i-chevron"/></svg><svg class="ico folder"><use href="#i-folder"/></svg>
+        <span class="nav-name">${escapeHtml(baseName(dir))}</span>
+        <span class="nav-remove" data-remove-folder="${escapeHtml(dir)}" role="button" aria-label="Remove folder from workspace" data-tip="Remove from workspace">${svg("x")}</span></div>${body}`;
+    }).join("")}</div>`;
+  }
+  // Loose files: opened one by one, outside every folder. Big Brain treats them as one set.
+  html += files.map((p) => navItem({
+    path: p, name: baseName(p), sub: escapeHtml(prettyDir(p)), current: p === state.path,
+    extra: `<span class="nav-remove" data-remove-file="${escapeHtml(p)}" role="button" aria-label="Remove file from workspace" data-tip="Remove from workspace">${svg("x")}</span>`,
+  })).join("");
   el.sbList.innerHTML = html;
 }
 
@@ -1498,7 +1594,7 @@ async function runSearch() {
   const q = el.sbSearch.value.trim();
   el.sbClear.hidden = !el.sbSearch.value;
   if (!q) return renderSidebar();
-  const files = [...new Set([...state.recents, ...folderFiles()])];
+  const files = [...new Set([...state.recents, ...workspaceFiles({ openable: true })])];
   const lower = q.toLowerCase();
   const byName = files.filter((p) => baseName(p).toLowerCase().includes(lower)).slice(0, 20);
   const hits = await invoke("search_files", { paths: files, query: q });
@@ -1540,8 +1636,10 @@ function activateNav(item) {
 }
 
 el.sbList.addEventListener("click", (e) => {
-  const remove = e.target.closest("[data-remove]");
-  if (remove) return removeRecent(remove.dataset.remove);
+  const remove = e.target.closest("[data-remove], [data-remove-folder], [data-remove-file]");
+  if (remove?.dataset.remove) return removeRecent(remove.dataset.remove);
+  if (remove?.dataset.removeFolder) return removeFolder(remove.dataset.removeFolder);
+  if (remove) return removeLooseFile(remove.dataset.removeFile);
   const item = e.target.closest(".nav-item");
   if (item) activateNav(item);
 });
@@ -1633,6 +1731,10 @@ function renderHistoryList(container) {
 }
 
 function renderWelcome() {
+  const current = state.workspace.folders.join("\n");
+  el.welcomeWorkspaces.innerHTML = store.get("recentWorkspaces", [])
+    .map((folders, i) => (folders.join("\n") === current ? "" : `<button class="btn" data-action="open-workspace" data-i="${i}" title="${escapeHtml(folders.join("\n"))}">
+      ${svg("folder")}${escapeHtml(baseName(folders[0]))}${folders.length > 1 ? ` +${folders.length - 1}` : ""}</button>`)).join("");
   renderHistoryList(el.welcomeList);
   el.welcomeEmpty.hidden = state.recents.length > 0;
 }
@@ -1718,13 +1820,14 @@ const actions = {
   "toggle-sidebar": toggleSidebar,
   "open-file": pickFile,
   "open-folder": pickFolder,
-  "refresh-folder": loadTree,
+  "refresh-folder": () => loadTree(),
   "settings-reset": () => {
     state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiProvider: state.settings.aiProvider, aiModel: state.settings.aiModel, aiMemory: state.settings.aiMemory };
     applySettings();
     for (const input of $$("[data-font]", el.settingsDlg)) input.value = "";
   },
-  "close-folder": () => { state.folder = null; store.set("folder", null); loadTree(); },
+  "close-folder": () => setWorkspace([]),
+  "open-workspace": (b) => setWorkspace(store.get("recentWorkspaces", [])[Number(b.dataset.i)] || []),
   "toggle-outline": () => { store.set("outlineOpen", !store.get("outlineOpen", true)); renderSidebar(); },
   "clear-search": () => { el.sbSearch.value = ""; runSearch(); el.sbSearch.focus(); },
   find: () => openFind(),
@@ -1789,7 +1892,7 @@ async function settlePreview() {
 
 function exported(path) {
   toast(`Exported “${baseName(path)}”.`, "success", { label: "Open", run: () => openFile(path) });
-  if (state.folder) loadTree().catch(() => {});
+  loadTree().catch(() => {});
 }
 
 async function exportPdf() {
@@ -1887,14 +1990,15 @@ function paletteCommands(q) {
   const editing = hasDoc && state.mode !== "read";
   const found = !q ? [] : [
     ...(hasDoc ? scanSource(state.text).headings : []).map((h, i) => ({ group: "Headings", icon: "chevron", title: h.text, run: () => gotoHeading(i) })),
-    ...[...new Set([...state.recents, ...folderFiles()])].filter((p) => p !== state.path)
+    ...[...new Set([...state.recents, ...workspaceFiles({ openable: true })])].filter((p) => p !== state.path)
       .map((p) => ({ group: "Files", icon: "file", title: baseName(p), sub: prettyDir(p), run: () => openFile(p) })),
   ];
   return [
     { group: "File", icon: "plus", title: "New File", key: "Ctrl N", keywords: "create blank untitled document", run: newFile },
     { group: "File", icon: "window", title: "New Window", key: "Ctrl Shift N", keywords: "another second instance blank", run: newWindow },
     { group: "File", icon: "file", title: "Open File", key: "Ctrl O", keywords: "browse load document", run: pickFile },
-    { group: "File", icon: "folder-plus", title: "Open Folder", key: "Ctrl Shift O", keywords: "directory workspace tree", run: pickFolder },
+    { group: "File", icon: "folder-plus", title: "Add Folder to Workspace", key: "Ctrl Shift O", keywords: "open directory tree", run: pickFolder },
+    ...(state.workspace.folders.length || state.workspace.files.length ? [{ group: "File", icon: "x", title: "Close Workspace", keywords: "folder remove", run: () => setWorkspace([]) }] : []),
     { group: "File", icon: "save", title: "Save", key: "Ctrl S", keywords: "write store disk", on: hasDoc, run: () => save().then((ok) => ok && toast("Saved")) },
     { group: "File", icon: "save", title: "Save As", keywords: "write store disk copy new name", on: hasDoc, run: saveAs },
     { group: "File", icon: "pdf", title: "Export as PDF", key: "Ctrl P", keywords: "print export convert pdf paper", on: hasDoc, run: exportPdf },
@@ -2223,22 +2327,22 @@ function aiDocument() {
 
 const aiMemoryOn = () => state.settings.aiMemory !== "off";
 const aiDocIsLarge = (doc) => Boolean(doc && doc.text.length > MARK_LIMITS.fullDoc);
-const relPath = (path) => (state.folder && path.startsWith(state.folder) ? path.slice(state.folder.length).replace(/^[\\/]/, "") : path);
 
 // Parts are ordered from rarely to often changing; see markctx.js.
 function systemPrompt(chat) {
-  const files = folderFiles().length;
+  const files = workspaceFiles({ openable: true }).length;
+  const folders = state.workspace.folders;
   return [
     MARK_RULES,
     memoryContext(state.ai.memory, aiMemoryOn()),
-    `## Session\nDate: ${localDate()}${files ? `\nOpen folder: ${state.folder} (${files} Markdown files)` : ""}`,
+    `## Session\nDate: ${localDate()}${files ? `\nWorkspace: ${folders.length ? folders.join(", ") : "loose files only"} (${files} Markdown files)` : ""}`,
     documentContext(aiDocument(), scanSource),
     chat.summary ? `## Earlier in this conversation (summary)\n${chat.summary}` : "",
   ].filter(Boolean).join("\n\n");
 }
 
 function aiTools() {
-  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFolder: folderFiles().length > 0, memory: aiMemoryOn() });
+  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFolder: workspaceFiles({ openable: true }).length > 0, memory: aiMemoryOn() });
 }
 
 function apiUserContent(message) {
@@ -2770,22 +2874,22 @@ async function runAiTool(name, args) {
       return { result: total ? `${head}\n${hits.map((hit) => `${hit.line}: ${hit.text}`).join("\n")}` : "No matches.", detail: `“${query}” · ${count(total, "match")}` };
     }
     case "list_files": {
-      const files = folderFiles().map(relPath);
+      const files = workspaceFiles({ openable: true }).map(relPath);
       const shown = files.slice(0, 400);
       return { result: `${shown.join("\n") || "The open folder has no Markdown files."}${files.length > shown.length ? `\n[${files.length - shown.length} more not listed; use search_files.]` : ""}`, detail: count(files.length, "file") };
     }
     case "search_files": {
       if (!query) throw new Error("query is empty.");
-      const hits = await invoke("search_files", { paths: folderFiles(), query });
+      const hits = await invoke("search_files", { paths: workspaceFiles({ openable: true }), query });
       const shown = hits.slice(0, 60);
-      return { result: shown.length ? shown.map((hit) => `${relPath(hit.path)}:${hit.line}: ${hit.text}`).join("\n") : "No matches.", detail: `“${query}” · ${count(hits.length, "match")}` };
+      return { result: shown.length ? shown.map((hit) => `${displayPath(hit.path)}:${hit.line}: ${hit.text}`).join("\n") : "No matches.", detail: `“${query}” · ${count(hits.length, "match")}` };
     }
     case "read_file": {
       const want = String(args.path || "").trim().replace(/^\.[\\/]/, "");
-      const path = folderFiles().find((file) => file === want || relPath(file) === want);
+      const path = workspaceFiles({ openable: true }).find((file) => file === want || displayPath(file) === want);
       if (!path) throw new Error("No such Markdown file in the open folder. Call list_files for valid paths.");
       const out = numberedLines(path === state.path ? text : await invoke("read_file", { path }), args.start_line, args.end_line);
-      return { result: `${relPath(path)}\n${out.text}`, detail: `${relPath(path)} · lines ${out.from}–${out.to}` };
+      return { result: `${displayPath(path)}\n${out.text}`, detail: `${displayPath(path)} · lines ${out.from}–${out.to}` };
     }
     case "remember": {
       if (!aiMemoryOn()) throw new Error("Memory is turned off.");
@@ -3708,13 +3812,7 @@ async function checkDisk() {
 
 addEventListener("focus", () => {
   checkDisk();
-  if (!state.folder) return;
-  const dir = state.folder;
-  invoke("list_markdown", { dir }).then((tree) => {
-    if (dir !== state.folder || JSON.stringify(tree) === JSON.stringify(state.tree)) return;
-    state.tree = tree;
-    renderSidebar();
-  }, () => { /* folder gone: keep the last listing */ });
+  loadTree({ ifChanged: true }).catch(() => { /* keep the last listing */ });
 });
 
 // ---------- boot ----------
@@ -3733,7 +3831,8 @@ addEventListener("focus", () => {
   if (store.get("aiOpen", false)) openAiPanel({ focus: false });
   loadAiProviders();
   loadAiMemory();
-  if (state.folder) loadTree().catch(() => setFolder(null));
+  for (const dir of state.workspace.folders) state.expanded.add(dir);
+  loadTree().catch(() => {});
   // Path shortening (~) is cosmetic: apply it when it arrives instead of waiting on it.
   tpath.homeDir().then((home) => {
     state.home = home.replace(/[\\/]$/, "");

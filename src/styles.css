@@ -402,6 +402,9 @@ kbd {
 .welcome-actions .btn { height: 36px; padding: 0 16px; }
 .welcome-actions .btn svg { color: var(--text-secondary); }
 .welcome-actions .btn-primary svg { color: inherit; }
+.welcome-workspaces { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; margin-top: 14px; }
+.welcome-workspaces:empty { display: none; }
+.welcome-workspaces .btn svg { color: #4F8DF0; }
 
 .welcome-history { width: min(520px, 100%); margin-top: 44px; display: flex; flex-direction: column; gap: 10px; }
 .wh-head { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; }
