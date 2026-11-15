@@ -17,6 +17,7 @@ const el = {
   root: document.documentElement,
   win: $(".window"),
   docName: $(".doc-name"),
+  tabbar: $(".tabbar"),
   dirty: $(".dirty-dot"),
   tbDoc: $(".tb-doc"),
   modeSeg: $(".tb-doc .segmented"),
@@ -153,6 +154,8 @@ const state = {
     : { folders: [], files: [] },
   roots: [],        // per folder, from list_workspace: { path, tree, files, truncated }
   expanded: new Set(),
+  tabs: [],         // open documents; the active one lives in the fields above, the others are parked (see "tabs")
+  tab: null,        // id of the active tab
   settings: { ...DEFAULT_SETTINGS, ...store.get("settings", {}) },
   home: "",
   sep: "/",
@@ -410,7 +413,7 @@ async function settleUnsaved() {
 // ---------- drafts: unsaved text survives a crash or power cut ----------
 let draftId = null;
 function draftKey() {
-  if (!state.path) return `untitled-${String(appWindow.label || "main").replace(/[^A-Za-z0-9-]/g, "")}`;
+  if (!state.path) return `untitled-${String(appWindow.label || "main").replace(/[^A-Za-z0-9-]/g, "")}-${state.tab}`;
   let hash = 5381; // djb2: only has to tell this user's own files apart
   for (let i = 0; i < state.path.length; i++) hash = ((hash * 33) ^ state.path.charCodeAt(i)) >>> 0;
   return `f${hash.toString(16)}-${state.path.length}`;
@@ -420,34 +423,37 @@ function clearDraft() {
   invoke("draft_delete", { id: draftId }).catch(() => {});
   draftId = null;
 }
-const draftSoon = debounce(() => {
+function saveDraft() {
   if (!isDirty()) return clearDraft();
   const id = draftKey();
   if (draftId && draftId !== id) clearDraft();
   draftId = id;
   invoke("draft_save", { id, json: JSON.stringify({ path: state.path, text: state.text, savedAt: new Date().toISOString() }) }).catch(() => {});
-}, 2000);
+}
+const draftSoon = debounce(saveDraft, 2000);
 
-/** At startup: bring the newest leftover draft back as unsaved changes. Nothing on disk is touched. */
-async function restoreDraft() {
+/** At startup: bring every leftover draft back as unsaved changes, each in its own tab. Nothing on disk is touched. */
+async function restoreDrafts() {
   let drafts = [];
   try {
     drafts = (await invoke("drafts_list")).map(([id, json]) => ({ id, ...JSON.parse(json) }));
-  } catch { return false; }
-  const draft = drafts.filter((d) => typeof d.text === "string").sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)))[0];
-  if (!draft) return false;
-  if (draft.path) {
-    if (!(await openFile(draft.path, { quiet: true }))) return false; // file is gone: keep the draft for later
-    if (state.text === draft.text) { invoke("draft_delete", { id: draft.id }).catch(() => {}); return true; }
-  } else {
-    await newFile();
+  } catch { return; }
+  drafts = drafts.filter((d) => typeof d.text === "string").sort((a, b) => String(a.savedAt).localeCompare(String(b.savedAt))); // newest ends up in front
+  const restored = [];
+  for (const draft of drafts) {
+    if (draft.path) {
+      if (!(await openFile(draft.path, { quiet: true }))) continue; // file is gone: keep the draft for later
+      if (state.text === draft.text) { invoke("draft_delete", { id: draft.id }).catch(() => {}); continue; }
+    } else {
+      newFile();
+    }
+    el.editor.value = draft.text;
+    resetHistory();
+    draftId = draft.id;
+    editorChanged();
+    restored.push(draft.path ? baseName(draft.path) : "Untitled");
   }
-  el.editor.value = draft.text;
-  draftId = draft.id;
-  editorChanged();
-  const when = new Date(draft.savedAt);
-  toast(`Restored unsaved changes${draft.path ? ` to “${baseName(draft.path)}”` : ""}${Number.isNaN(when.getTime()) ? "" : ` from ${when.toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}`}. Save to keep them, or close without saving to drop them.`);
-  return true;
+  if (restored.length) toast(`Restored unsaved changes to ${restored.map((name) => `“${name}”`).join(", ")}. Save to keep them, or close the tab without saving to drop them.`);
 }
 
 // ---------- recents ----------
@@ -465,44 +471,171 @@ function removeRecent(p) {
 }
 
 // ---------- opening / saving ----------
-/** Resolves true once the file is shown. `quiet` skips the error toast (used at startup). */
+/** Shows the file in its tab, opening one if needed. Resolves true once it is shown. `quiet` skips the error toast (used at startup). */
 async function openFile(p, { fragment = null, find: query = null, line = null, quiet = false } = {}) {
-  if (p === state.path) { // already open: keep any unsaved edits, just navigate
-    if (fragment) scrollToFragment(fragment);
-    if (query) openFind(query, { line });
-    return true;
-  }
-  if (!(await settleUnsaved())) return false;
-  const view = VIEW_RE.test(p) ? (/\.pdf$/i.test(p) ? "pdf" : "html") : null;
-  let text = "";
-  let bytes = null;
-  try {
-    if (view) bytes = await invoke("read_bytes", { path: p }); // html: only proves the file is readable
-    else text = await invoke("read_file", { path: p });
-  } catch {
-    if (quiet) return false;
-    toast(`Couldn't open “${baseName(p)}”. It may have been moved or deleted.`, "error");
-    if (state.recents.includes(p)) removeRecent(p);
-    return false;
-  }
-  Object.assign(state, { path: p, saved: text, text, untitled: false, view });
-  renderSrc = null; // relative images resolve against the new file's folder
-  el.editor.value = text;
-  resetHistory();
+  let tab = state.tabs.find((t) => tabPath(t) === p);
+  if (!tab) state.tabs.push(tab = { id: ++tabSeq, path: p, lazy: true });
+  if (!(await activateTab(tab.id, { quiet }))) return false;
   addRecent(p);
-  store.set("lastFile", p);
   addLooseFile(p);
   revealInTree(p);
-  showDoc();
-  if (view) return showViewer(view, p, bytes);
-  await renderPreview();
-  el.previewPane.scrollTop = 0;
-  el.editor.scrollTop = 0;
+  renderSidebar();
+  if (state.view) return true;
   if (fragment) scrollToFragment(fragment);
   if (query) openFind(query, { line });
-  else if (!el.findbar.hidden) runFind(el.findInput.value);
   return true;
 }
+
+// ---------- tabs ----------
+// The active tab's document lives in `state` (path, text, saved, ...), exactly as when the window held one
+// document: everything that renders, saves or searches reads it there. Switching parks those fields on the
+// outgoing tab object and loads the incoming one. A `lazy` tab has not been read from disk yet.
+let tabSeq = 0;
+const tabPath = (tab) => (tab.id === state.tab ? state.path : tab.path);
+const tabDirty = (tab) => (tab.id === state.tab ? isDirty() : !tab.lazy && !tab.view && tab.text !== tab.saved);
+
+function saveTabs() {
+  if (IS_MAIN) store.set("lastTabs", { paths: state.tabs.map(tabPath).filter(Boolean), active: state.path });
+}
+
+function stashTab() {
+  const tab = state.tabs.find((t) => t.id === state.tab);
+  if (!tab) return;
+  saveDraft(); // the debounced save would fire for the next tab instead
+  if (state.settings.autosave === "on" && state.path && isDirty()) save();
+  Object.assign(tab, {
+    path: state.path, untitled: state.untitled, saved: state.saved, text: state.text, view: state.view, draftId,
+    edits: { stack: edits.stack, at: edits.at, lastEdit: 0 },
+    scroll: [el.editor.scrollTop, el.previewPane.scrollTop],
+    selection: [el.editor.selectionStart, el.editor.selectionEnd],
+  });
+}
+
+/** Adds a tab for a document that is not on disk (yet) and shows it. */
+function openBlankTab(path = null) {
+  stashTab();
+  const tab = { id: ++tabSeq };
+  state.tabs.push(tab);
+  state.tab = tab.id;
+  Object.assign(state, { path, untitled: !path, saved: "", text: "", view: null });
+  draftId = null;
+  renderSrc = null;
+  el.editor.value = "";
+  resetHistory();
+  showDoc();
+  setMode("edit");
+  renderPreview();
+  saveTabs();
+}
+
+/** Brings a tab to the front, reading its file first if that has not happened yet. */
+async function activateTab(id, { quiet = false } = {}) {
+  const tab = state.tabs.find((t) => t.id === id);
+  if (!tab) return false;
+  if (id === state.tab) return true;
+  let bytes = null;
+  try { // read before touching the current tab, so a failure leaves it as it was
+    if (tab.lazy) tab.view = VIEW_RE.test(tab.path) ? (/\.pdf$/i.test(tab.path) ? "pdf" : "html") : null;
+    if (tab.view) bytes = await invoke("read_bytes", { path: tab.path }); // html: only proves the file is readable
+    else if (tab.lazy) tab.saved = tab.text = await invoke("read_file", { path: tab.path });
+  } catch {
+    state.tabs = state.tabs.filter((t) => t !== tab);
+    renderTabs();
+    saveTabs();
+    if (!quiet) toast(`Couldn't open “${baseName(tab.path)}”. It may have been moved or deleted.`, "error");
+    if (!quiet && state.recents.includes(tab.path)) removeRecent(tab.path);
+    return false;
+  }
+  if (!state.tabs.includes(tab)) return false; // closed while its file was being read
+  tab.lazy = false;
+  stashTab();
+  state.tab = id;
+  Object.assign(state, { path: tab.path, untitled: !!tab.untitled, saved: tab.saved || "", text: tab.text || "", view: tab.view || null });
+  draftId = tab.draftId || null;
+  renderSrc = null; // relative images resolve against the new file's folder
+  el.editor.value = state.text;
+  if (tab.edits) Object.assign(edits, tab.edits);
+  else resetHistory();
+  showDoc();
+  saveTabs();
+  // ponytail: a PDF/HTML tab is loaded again on every return, losing its scroll position; keep one frame per tab if that annoys.
+  if (state.view) return showViewer(state.view, state.path, bytes);
+  await renderPreview();
+  if (state.tab !== id) return true; // switched again while rendering
+  [el.editor.scrollTop, el.previewPane.scrollTop] = tab.scroll || [0, 0];
+  if (tab.selection) el.editor.setSelectionRange(...tab.selection);
+  if (!el.findbar.hidden) runFind(el.findInput.value);
+  return true;
+}
+
+/** Closes a tab after settling its unsaved changes. Resolves false when the user cancels. */
+async function closeTab(id = state.tab) {
+  const tab = state.tabs.find((t) => t.id === id);
+  if (!tab) return false;
+  if (tabDirty(tab)) {
+    if (!(await activateTab(id))) return false; // show what is being asked about
+    if (!(await settleUnsaved())) return false;
+  }
+  const at = state.tabs.indexOf(tab);
+  state.tabs.splice(at, 1);
+  if (id !== state.tab) { renderTabs(); saveTabs(); return true; }
+  clearDraft();
+  state.tab = null;
+  Object.assign(state, { path: null, untitled: false, saved: "", text: "", view: null });
+  const next = state.tabs[at] || state.tabs[at - 1];
+  if (next && (await activateTab(next.id))) return true;
+  if (state.tabs.length) return activateTab(state.tabs[0].id); // the neighbour's file was gone
+  el.editor.value = "";
+  el.viewerPane.replaceChildren();
+  closeFind();
+  el.doc.hidden = true;
+  el.status.hidden = true;
+  el.tbDoc.hidden = true;
+  renderWelcome();
+  el.welcome.hidden = false;
+  updateChrome();
+  renderSidebar();
+  saveTabs();
+  return true;
+}
+
+function cycleTab(step) {
+  const at = state.tabs.findIndex((t) => t.id === state.tab);
+  if (state.tabs.length > 1) activateTab(state.tabs[(at + step + state.tabs.length) % state.tabs.length].id);
+}
+
+function renderTabs() {
+  el.tabbar.hidden = !state.tabs.length;
+  el.tabbar.innerHTML = state.tabs.map((tab) => {
+    const path = tabPath(tab);
+    const name = path ? baseName(path) : "Untitled";
+    const active = tab.id === state.tab;
+    return `<div class="tab" role="tab" tabindex="${active ? 0 : -1}" aria-selected="${active}" data-tab="${tab.id}" title="${escapeHtml(path || name)}">
+      <span class="tab-name">${escapeHtml(name)}</span>
+      <i class="tab-dirty" ${tabDirty(tab) ? "" : "hidden"} title="Unsaved changes"></i>
+      <button class="tab-close" data-close-tab="${tab.id}" tabindex="-1" aria-label="Close ${escapeHtml(name)}" data-tip="Close" data-key="Ctrl W">${svg("x")}</button></div>`;
+  }).join("");
+  $('[aria-selected="true"]', el.tabbar)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+}
+
+el.tabbar.addEventListener("click", (e) => {
+  const close = e.target.closest("[data-close-tab]");
+  const tab = e.target.closest(".tab");
+  if (close) closeTab(Number(close.dataset.closeTab));
+  else if (tab) activateTab(Number(tab.dataset.tab));
+});
+el.tabbar.addEventListener("auxclick", (e) => {
+  const tab = e.target.closest(".tab");
+  if (tab && e.button === 1) { e.preventDefault(); closeTab(Number(tab.dataset.tab)); }
+});
+el.tabbar.addEventListener("keydown", (e) => {
+  const tab = e.target.closest(".tab");
+  if (!tab) return;
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); activateTab(Number(tab.dataset.tab)); }
+  else if (e.key === "ArrowRight" || e.key === "ArrowLeft") { e.preventDefault(); (e.key === "ArrowRight" ? tab.nextElementSibling : tab.previousElementSibling)?.focus(); }
+  else if (e.key === "Delete") closeTab(Number(tab.dataset.tab));
+});
+el.tabbar.addEventListener("wheel", (e) => { if (!e.deltaX) el.tabbar.scrollLeft += e.deltaY; }, { passive: true });
 
 async function save() {
   if (state.view) return false; // viewer files are never written
@@ -534,7 +667,7 @@ async function saveAs() {
   Object.assign(state, { path, saved: state.text, untitled: false, view: null });
   clearDraft();
   addRecent(path);
-  store.set("lastFile", path);
+  saveTabs();
   addLooseFile(path);
   revealInTree(path);
   renderSrc = null; // relative images now resolve against the new file's folder
@@ -545,28 +678,8 @@ async function saveAs() {
   return true;
 }
 
-async function newFile() {
-  if (!(await settleUnsaved())) return;
-  Object.assign(state, { path: null, untitled: true, saved: "", text: "", view: null });
-  renderSrc = null;
-  el.editor.value = "";
-  resetHistory();
-  showDoc();
-  setMode("edit");
-  renderPreview();
-}
-
-/** Starts a document that is written to `p` on first save (a path named on the command line). */
-async function newFileAt(p) {
-  if (!(await settleUnsaved())) return false;
-  Object.assign(state, { path: p, untitled: false, saved: "", text: "", view: null });
-  renderSrc = null;
-  el.editor.value = "";
-  resetHistory();
-  showDoc();
-  setMode("edit");
-  renderPreview();
-  return true;
+function newFile() {
+  openBlankTab();
 }
 
 function gotoLine(line) {
@@ -586,20 +699,22 @@ function gotoLine(line) {
 /** Opens what a launch, a later `markdowneditor <path>`, or a drop asked for. Resolves true once a document is shown. */
 async function handleOpenRequest(req) {
   if (req.folders.length) await addFolders(req.folders);
-  // ponytail: one document per window, so the first openable file wins; open them all once tabs exist.
-  const file = req.files.find((f) => canOpen(f.path));
-  if (!file) {
-    if (req.files.length) toast("Only Markdown, PDF and HTML files can be opened.", "error");
-    return false;
+  const files = req.files.filter((f) => canOpen(f.path));
+  if (files.length < req.files.length) toast("Only Markdown, PDF and HTML files can be opened.", "error");
+  let shown = false;
+  for (const file of files) { // each in its own tab; the last one ends up in front
+    if (!file.new) {
+      if (!(await openFile(file.path))) continue;
+      if (file.line && !state.view) gotoLine(file.line);
+    } else if (MD_RE.test(file.path)) {
+      openBlankTab(file.path); // written to that path on first save
+    } else {
+      toast(`Couldn't open “${baseName(file.path)}”. It does not exist.`, "error");
+      continue;
+    }
+    shown = true;
   }
-  if (file.new) {
-    if (MD_RE.test(file.path)) return newFileAt(file.path);
-    toast(`Couldn't open “${baseName(file.path)}”. It does not exist.`, "error");
-    return false;
-  }
-  if (!(await openFile(file.path))) return false;
-  if (file.line && !state.view) gotoLine(file.line);
-  return true;
+  return shown;
 }
 
 async function newWindow() {
@@ -1006,6 +1121,7 @@ function setMode(mode) {
 
 let shownDirty = false;
 function updateChrome() {
+  renderTabs();
   const name = state.path ? baseName(state.path) : state.untitled ? "Untitled" : "MarkdownEditor";
   shownDirty = isDirty();
   el.docName.textContent = name;
@@ -2135,6 +2251,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   if (!mod || e.altKey || document.querySelector("dialog[open]")) return;
+  if (e.key === "Tab") { e.preventDefault(); cycleTab(e.shiftKey ? -1 : 1); return; }
   if (e.shiftKey && k === "m") { e.preventDefault(); toggleAiPanel(); return; }
   const run = {
     o: () => (e.shiftKey ? pickFolder() : pickFile()),
@@ -2143,6 +2260,7 @@ document.addEventListener("keydown", (e) => {
     h: () => openFind(undefined, { replace: true }),
     p: () => (e.shiftKey ? openPalette() : exportPdf()),
     n: () => (e.shiftKey ? newWindow() : newFile()),
+    w: () => (state.tabs.length ? closeTab() : appWindow.close()),
     e: () => (e.shiftKey ? exportHtml() : state.path && !state.view && setMode({ read: "split", split: "edit", edit: "read" }[state.mode])),
     b: toggleSidebar,
     ",": actions.settings,
@@ -3769,9 +3887,12 @@ async function syncMaximized() {
 appWindow.onResized(syncMaximized);
 
 appWindow.onCloseRequested(async (e) => {
-  if (!isDirty()) return;
+  if (!state.tabs.some(tabDirty)) return;
   e.preventDefault();
-  if (await settleUnsaved()) await appWindow.destroy();
+  for (const tab of state.tabs.filter(tabDirty)) { // ask about each unsaved tab in turn; Cancel keeps the window
+    if (!(await activateTab(tab.id)) || !(await settleUnsaved())) return;
+  }
+  await appWindow.destroy();
 });
 
 webview.onDragDropEvent((e) => {
@@ -3810,8 +3931,20 @@ async function checkDisk() {
   if (!el.findbar.hidden) runFind(el.findInput.value, { keepIndex: true, scroll: false });
 }
 
+/** Parked tabs follow the disk too, unless they hold unsaved edits. */
+async function checkParkedTabs() {
+  for (const tab of state.tabs) {
+    if (tab.id === state.tab || tab.lazy || tab.view || !tab.path || tabDirty(tab)) continue;
+    try {
+      const text = await invoke("read_file", { path: tab.path });
+      if (tab.id !== state.tab && text !== tab.saved) Object.assign(tab, { saved: text, text, edits: null });
+    } catch { /* deleted or unreadable: keep the buffer */ }
+  }
+}
+
 addEventListener("focus", () => {
   checkDisk();
+  checkParkedTabs();
   loadTree({ ifChanged: true }).catch(() => { /* keep the last listing */ });
 });
 
@@ -3841,15 +3974,21 @@ addEventListener("focus", () => {
     renderWelcome();
     if (state.path) updateChrome();
   }, () => { /* fall back to full paths */ });
-  const showWelcome = () => { renderWelcome(); el.welcome.hidden = false; };
   const req = await initialReq;
-  if (req?.files.length || req?.folders.length) { // an explicit request wins over the last session
-    if (!(await handleOpenRequest(req))) showWelcome();
-    return;
+  if (!fresh) {
+    await restoreDrafts();
+    // A missing file is not worth an error on startup: it just does not come back.
+    const last = state.settings.startup === "last" ? store.get("lastTabs", null) || { paths: [store.get("lastFile", null)].filter(Boolean) } : { paths: [] }; // "lastFile": older versions
+    const open = new Set(state.tabs.map(tabPath));
+    for (const path of last.paths) if (!open.has(path)) state.tabs.push({ id: ++tabSeq, path, lazy: true }); // read when first shown
+    const front = state.tabs.find((t) => t.path === last.active) || state.tabs.find((t) => t.lazy);
+    if (!state.tab && front) await openFile(front.path, { quiet: true });
+    renderTabs();
   }
-  if (fresh) return showWelcome();
-  if (await restoreDraft()) return;
-  // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
-  const last = state.settings.startup === "last" ? store.get("lastFile", null) : null;
-  if (!last || !(await openFile(last, { quiet: true }))) showWelcome();
+  if (req?.files.length || req?.folders.length) await handleOpenRequest(req); // an explicit request ends up in front
+  if (!state.tab && state.tabs.length) await activateTab(state.tabs[0].id, { quiet: true });
+  if (!state.tab) {
+    renderWelcome();
+    el.welcome.hidden = false;
+  }
 })();

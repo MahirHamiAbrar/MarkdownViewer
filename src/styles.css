@@ -445,6 +445,20 @@ kbd {
 .history-head .icon-btn { margin-left: auto; }
 
 /* ========== Document ========== */
+/* tabs */
+.tabbar { flex: none; display: flex; gap: 2px; padding: 4px 8px 0; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--border-subtle); }
+.tabbar::-webkit-scrollbar { display: none; }
+.tab { flex: none; max-width: 220px; height: 30px; display: flex; align-items: center; gap: 6px; padding: 0 6px 0 12px; border-radius: var(--radius-sm) var(--radius-sm) 0 0; color: var(--text-secondary); font-size: .92rem; cursor: default; user-select: none; }
+.tab:hover { background: var(--bg-hover); }
+.tab[aria-selected="true"] { background: var(--bg-card); color: var(--text-primary); box-shadow: inset 0 -2px 0 var(--accent); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tab-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab-dirty { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none; }
+.tab-close { width: 20px; height: 20px; display: grid; place-items: center; flex: none; border: 0; background: none; border-radius: var(--radius-sm); color: var(--text-tertiary); opacity: 0; }
+.tab-close svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.tab:hover .tab-close, .tab[aria-selected="true"] .tab-close, .tab-close:focus-visible { opacity: 1; }
+.tab-close:hover { background: var(--bg-hover); color: var(--text-primary); }
+
 .doc { flex: 1; min-height: 0; display: flex; }
 .pane { flex: 1; min-width: 0; overflow: auto; }
 .doc[data-mode="read"] .editor-pane, .doc[data-mode="edit"] .preview-pane { display: none; }
