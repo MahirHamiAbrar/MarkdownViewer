@@ -243,7 +243,8 @@ mod tests {
         // The tree shows what can be opened, ignored or not; the index is what Big Brain reads.
         assert_eq!(tree.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["build", "docs"], "{tree:?}");
         let at = |name: &str| root.join(name).to_string_lossy().into_owned();
-        assert_eq!(roots[0].files, [at("docs/Guide.md"), at("notes.txt")]);
+        let guide = root.join("docs").join("Guide.md").to_string_lossy().into_owned();
+        assert_eq!(roots[0].files, [guide, at("notes.txt")]);
         assert!(!roots[0].truncated);
         assert!(text_files(&root, 1).1);
 

@@ -6,8 +6,22 @@ All notable changes to MarkdownEditor are listed here. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-11-15
+
 ### Added
 
+- macOS (universal `.dmg`) and Windows (`.msi` and setup `.exe`) builds on the Releases page.
+  They are not code-signed yet.
+- Tabs: a window keeps several documents open (Ctrl+W closes, Ctrl+Tab cycles), and unsaved
+  tabs are restored after a restart.
+- Workspaces: a window holds any number of folders plus loose files, restored on launch and
+  refreshed when files change on disk.
+- Command line: `markdowneditor [options] [path[:line]]...` opens files, folders, a line number
+  or a new file; `mde` is a short alias.
+- Big Brain reads every text file in the workspace, with `@` mentions in the composer.
+- Big Brain inspects PDFs and reads them as text or page images.
+- Big Brain can edit and create workspace files; every change shows a diff and waits for
+  Accept or Reject (Settings → Big Brain → File changes).
 - Export as HTML (Ctrl Shift E): one self-contained page with styles, math fonts and local
   images embedded.
 - PDF and HTML files open in a built-in viewer, from the open dialog, the folder tree, drag and

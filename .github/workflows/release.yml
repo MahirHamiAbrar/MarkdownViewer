@@ -1,33 +1,58 @@
 name: Release
 
-# Push a tag `vX.Y.Z` to build Linux (.deb, .AppImage), macOS (.dmg, universal) and Windows
-# (.msi, setup .exe) packages and publish them, signed and checksummed, on the Releases page.
-# The tag must match the app version and have a CHANGELOG.md section.
+# Every push to main builds Linux (.deb, .AppImage), macOS (.dmg, universal) and Windows
+# (.msi, setup .exe) packages and publishes them, signed and checksummed, as a new release.
+# Version: the app version in tauri.conf.json when it is higher than the latest v* tag (a
+# manual minor or major bump), otherwise the latest tag with its patch number plus one.
+# The workflow creates the tag itself.
 on:
   push:
-    tags: ["v*"]
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+# One release at a time, so two pushes never pick the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  version:
     runs-on: ubuntu-22.04
-    env:
-      TAG: ${{ github.ref_name }}
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - name: Check the tag, the version and the changelog
+        with:
+          fetch-depth: 0 # tags and history for the version and the notes
+      - name: Pick the version and the notes
+        id: pick
         run: |
-          version="${TAG#v}"
-          app_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
-          [ "$version" = "$app_version" ] || { echo "::error::Tag $TAG does not match app version $app_version"; exit 1; }
-          # Everything under "## [X.Y.Z]" up to the next "## [" heading becomes the release notes.
-          awk -v v="$version" '
-            /^## \[/ { on = (index($0, "## [" v "]") == 1); next }
-            on { print }
-          ' CHANGELOG.md | sed -e '/./,$!d' > notes.md
-          [ -s notes.md ] || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
+          base="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          latest="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          latest="${latest#v}"
+          if [ -z "$latest" ] || { [ "$base" != "$latest" ] && [ "$(printf '%s\n%s\n' "$base" "$latest" | sort -V | tail -1)" = "$base" ]; }; then
+            version="$base"
+          else
+            IFS=. read -r major minor patch <<< "$latest"
+            version="$major.$minor.$((patch + 1))"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version (app version $base, latest tag ${latest:-none})"
+
+          # Notes: the CHANGELOG.md section for this version, else "Unreleased", else the commits.
+          section() {
+            awk -v h="## [$1]" '
+              /^## \[/ { on = (index($0, h) == 1); next }
+              on { print }
+            ' CHANGELOG.md | sed -e '/./,$!d'
+          }
+          section "$version" > notes.md
+          [ -s notes.md ] || section Unreleased > notes.md
+          [ -s notes.md ] || git log --format='- %s' ${latest:+"v$latest"..HEAD} > notes.md
           cat notes.md
       - uses: actions/upload-artifact@v4
         with:
@@ -35,7 +60,7 @@ jobs:
           path: notes.md
 
   build:
-    needs: check
+    needs: version
     strategy:
       fail-fast: true
       matrix:
@@ -80,6 +105,15 @@ jobs:
         with:
           workspaces: src-tauri
       - run: npm ci
+      - name: Set the release version
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs"), p = "src-tauri/tauri.conf.json";
+            const conf = JSON.parse(fs.readFileSync(p, "utf8"));
+            conf.version = process.argv[1];
+            fs.writeFileSync(p, JSON.stringify(conf, null, 2) + "\n");
+          ' "${{ needs.version.outputs.version }}"
       - name: Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
@@ -109,16 +143,15 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write # create the release
       id-token: write # build provenance
       attestations: write
     env:
-      TAG: ${{ github.ref_name }}
+      TAG: v${{ needs.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4 # gh release --verify-tag needs the repository
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -159,4 +192,6 @@ jobs:
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$TAG" dist/* --title "MarkdownEditor $TAG" --notes-file notes.md --verify-tag
+        run: |
+          gh release create "$TAG" dist/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "MarkdownEditor $TAG" --notes-file notes.md
