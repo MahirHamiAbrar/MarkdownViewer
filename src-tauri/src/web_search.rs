@@ -887,8 +887,10 @@ mod tests {
 
     #[test]
     fn direct_requires_explicit_opt_in_and_beats_tor() {
-        let mut config = SearchConfig::default();
-        config.allow_direct = true;
+        let mut config = SearchConfig {
+            allow_direct: true,
+            ..Default::default()
+        };
         assert!(config.effective_proxies().is_empty());
         assert!(!config.is_private());
         assert!(config.ready());
