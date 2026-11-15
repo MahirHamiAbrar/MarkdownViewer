@@ -225,14 +225,16 @@
           </div>
           <div class="ai-chat-total" hidden></div>
           <div class="ai-input-row">
-            <textarea class="ai-input" rows="1" placeholder="Ask Big Brain about this file…" aria-label="Message Big Brain"></textarea>
+            <textarea class="ai-input" rows="1" placeholder="Ask Big Brain · @ to mention a file" aria-label="Message Big Brain" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-mention-menu"></textarea>
             <button class="btn btn-primary ai-send" type="submit" aria-label="Send" data-tip="Send"><svg><use href="#i-send"/></svg></button>
             <button class="btn ai-stop" type="button" data-action="ai-stop" aria-label="Stop" data-tip="Stop" hidden><svg><use href="#i-stop"/></svg></button>
           </div>
-          <p class="ai-foot">Big Brain sees the open file · <kbd>Enter</kbd> send · <kbd>Shift</kbd><kbd>Enter</kbd> new line</p>
+          <p class="ai-foot">Sees the open file, reads the workspace · <kbd>@</kbd> mention · <kbd>Enter</kbd> send</p>
         </form>
       </aside>
     </div>
+
+    <div class="mention-menu popover" id="app-mention-menu" role="listbox" aria-label="Files to mention" hidden></div>
 
     <div class="drop-overlay" hidden>
       <div><svg><use href="#i-drop"/></svg><p>Drop a Markdown file to open it</p></div>

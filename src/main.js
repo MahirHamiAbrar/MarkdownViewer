@@ -80,6 +80,7 @@ const el = {
   aiChatTotal: $(".ai-chat-total"),
   aiComposer: $(".ai-composer"),
   aiInput: $(".ai-input"),
+  mentionMenu: $(".mention-menu"),
   aiSend: $(".ai-send"),
   aiStop: $(".ai-stop"),
   aiSelChip: $(".ai-selchip"),
@@ -2457,23 +2458,109 @@ const aiDocIsLarge = (doc) => Boolean(doc && doc.text.length > MARK_LIMITS.fullD
 
 // Parts are ordered from rarely to often changing; see markctx.js.
 function systemPrompt(chat) {
-  const files = workspaceFiles({ openable: true }).length;
-  const folders = state.workspace.folders;
+  const files = workspaceFiles().length;
+  const { folders, files: loose } = state.workspace;
+  const tabs = state.tabs.map(tabPath).filter(Boolean).map(displayPath);
+  const workspace = files
+    ? `\nWorkspace: ${files} text files${folders.length ? `\nFolders: ${folders.join(", ")}` : ""}${loose.length ? `\nSingle files: ${loose.slice(0, 40).map(displayPath).join(", ")}` : ""}${tabs.length > 1 ? `\nOpen tabs: ${tabs.slice(0, 40).join(", ")}` : ""}`
+    : "";
   return [
     MARK_RULES,
     memoryContext(state.ai.memory, aiMemoryOn()),
-    `## Session\nDate: ${localDate()}${files ? `\nWorkspace: ${folders.length ? folders.join(", ") : "loose files only"} (${files} Markdown files)` : ""}`,
+    `## Session\nDate: ${localDate()}${workspace}`,
     documentContext(aiDocument(), scanSource),
     chat.summary ? `## Earlier in this conversation (summary)\n${chat.summary}` : "",
   ].filter(Boolean).join("\n\n");
 }
 
 function aiTools() {
-  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFolder: workspaceFiles({ openable: true }).length > 0, memory: aiMemoryOn() });
+  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFiles: workspaceFiles().length > 0, memory: aiMemoryOn() });
+}
+
+/** The workspace file a name from the model or an @mention refers to: absolute, display path, or a unique path ending. */
+function resolveWorkspaceFile(name) {
+  const want = String(name || "").trim().replace(/^\.[\\/]/, "");
+  if (!want) return null;
+  const files = workspaceFiles();
+  const exact = files.find((file) => file === want || displayPath(file) === want);
+  if (exact) return exact;
+  const tails = files.filter((file) => file.endsWith(`/${want}`) || file.endsWith(`\\${want}`));
+  return tails.length === 1 ? tails[0] : null;
+}
+
+/** Current text of a workspace file: the editor's when it is open in a tab (unsaved edits included), else the disk's. */
+async function workspaceText(path) {
+  const tab = state.tabs.find((t) => tabPath(t) === path);
+  if (tab && tab.id === state.tab && !state.view) return state.text;
+  if (tab && !tab.lazy && !tab.view) return tab.text;
+  return invoke("read_file", { path });
+}
+
+// ---------- @mentions: files and folders named in a chat message ----------
+/** Everything that can be mentioned, as { path, label, dir }; `dir` entries stand for a whole folder. */
+let mentionCache = { roots: null, loose: 0, list: [] };
+function mentionCandidates() {
+  if (mentionCache.roots === state.roots && mentionCache.loose === state.workspace.files.length) return mentionCache.list;
+  const files = workspaceFiles().map((path) => ({ path, label: displayPath(path), dir: false }));
+  const dirs = new Set();
+  for (const { label } of files) {
+    for (let at = label.indexOf("/"); at !== -1; at = label.indexOf("/", at + 1)) dirs.add(label.slice(0, at + 1));
+  }
+  const list = [...files, ...[...dirs].map((label) => ({ path: label, label, dir: true }))];
+  mentionCache = { roots: state.roots, loose: state.workspace.files.length, list };
+  return list;
+}
+
+function resolveMention(name) {
+  const list = mentionCandidates();
+  const dir = list.find((c) => c.dir && (c.label === name || c.label === `${name}/`));
+  if (dir) return dir;
+  const path = resolveWorkspaceFile(name);
+  return path ? list.find((c) => !c.dir && c.path === path) : null;
+}
+
+/**
+ * Reads what a message mentions, once, at send time: the snapshot is stored with the message so later turns
+ * replay the same text. All mentions of one message share MARK_LIMITS.fullDoc characters.
+ */
+async function mentionAttachments(text) {
+  let budget = MARK_LIMITS.fullDoc;
+  const out = [];
+  for (const entry of parseMentions(text, resolveMention)) {
+    if (entry.dir) {
+      const inside = mentionCandidates().filter((c) => !c.dir && c.label.startsWith(entry.label)).map((c) => c.label);
+      const shown = inside.slice(0, 300);
+      out.push({ path: entry.label, kind: "folder", text: `${shown.join("\n")}${inside.length > shown.length ? `\n[${inside.length - shown.length} more files; use list_files.]` : ""}` });
+      budget -= shown.join("\n").length;
+      continue;
+    }
+    if (/\.pdf$/i.test(entry.path)) {
+      out.push({ path: entry.label, kind: "note", text: "This is a PDF. It has not been read yet." });
+      continue;
+    }
+    let body;
+    try { body = await workspaceText(entry.path); } catch { body = null; }
+    if (body === null) { out.push({ path: entry.label, kind: "note", text: "This file could not be read as text." }); continue; }
+    if (body.length <= budget) {
+      out.push({ path: entry.label, kind: "file", text: body });
+      budget -= body.length;
+      continue;
+    }
+    const room = Math.max(0, budget);
+    budget = 0;
+    if (room < 2000) { out.push({ path: entry.label, kind: "note", text: "Not attached: the attachment limit was reached. Use read_file to read it." }); continue; }
+    const part = body.slice(0, body.lastIndexOf("\n", room) + 1);
+    const lines = part.split("\n").length - 1;
+    out.push({ path: entry.label, kind: "file", text: `${part}[Cut after line ${lines} of ${body.split("\n").length}: attachment limit. Use read_file for the rest.]` });
+  }
+  return out;
 }
 
 function apiUserContent(message) {
   const parts = [];
+  for (const file of message.attachments || []) {
+    parts.push(file.kind === "folder" ? `[Attached folder — ${file.path}]\n${file.text}` : file.kind === "note" ? `[Attached file — ${file.path}]\n${file.text}` : `[Attached file — ${file.path}]\n<file>\n${file.text}\n</file>`);
+  }
   if (message.reply?.text) {
     const who = message.reply.role === "assistant" ? "Big Brain's" : "the user's";
     parts.push(`[Replying to this part of ${who} previous message]\n${message.reply.text}`);
@@ -2645,6 +2732,19 @@ function renderAiMessage(msg, index) {
       quote.append(label, document.createTextNode(`${msg.selection.text.slice(0, 600)}${msg.selection.text.length > 600 ? "…" : ""}`));
       node.append(quote);
     }
+    if (msg.attachments?.length) {
+      const files = document.createElement("div");
+      files.className = "ai-attachments";
+      for (const file of msg.attachments) {
+        const chip = document.createElement("span");
+        chip.className = "ai-attachment";
+        chip.title = file.kind === "file" ? `${file.path} · sent with this message` : file.path;
+        chip.innerHTML = svg(file.kind === "folder" ? "folder" : "file");
+        chip.append(file.path.replace(/\/$/, "").split("/").pop() + (file.kind === "folder" ? "/" : ""));
+        files.append(chip);
+      }
+      node.append(files);
+    }
     const bubble = document.createElement("div");
     bubble.className = "ai-bubble";
     bubble.textContent = msg.content;
@@ -2801,9 +2901,12 @@ async function sendAiMessage(text) {
   const chat = ensureChat();
   const selection = state.ai.selection;
   const reply = state.ai.reply;
+  hideMentionMenu();
+  el.aiInput.value = ""; // before the mentioned files are read, so a second Enter cannot send it twice
+  const attachments = await mentionAttachments(value);
   chat.file = currentFileMeta();
   chat.effort = aiEffort();
-  chat.messages.push({ role: "user", content: value, selection: selection || null, reply: reply || null, createdAt: new Date().toISOString() });
+  chat.messages.push({ role: "user", content: value, selection: selection || null, reply: reply || null, attachments: attachments.length ? attachments : undefined, createdAt: new Date().toISOString() });
   state.ai.selection = null;
   state.ai.reply = null;
   state.ai.pinned = true;
@@ -2983,7 +3086,7 @@ async function runAiToolCall(current, call) {
   return result;
 }
 
-/** Runs one tool for the model. Files are limited to the Markdown files of the open folder. */
+/** Runs one tool for the model. Files are limited to the text files of the workspace. */
 async function runAiTool(name, args) {
   const text = state.text || "";
   const query = String(args.query || "").trim();
@@ -3001,21 +3104,23 @@ async function runAiTool(name, args) {
       return { result: total ? `${head}\n${hits.map((hit) => `${hit.line}: ${hit.text}`).join("\n")}` : "No matches.", detail: `“${query}” · ${count(total, "match")}` };
     }
     case "list_files": {
-      const files = workspaceFiles({ openable: true }).map(relPath);
+      const under = String(args.folder || "").trim().replace(/^\.[\\/]/, "").replace(/[\\/]$/, "");
+      const all = workspaceFiles().map(displayPath);
+      const files = under ? all.filter((file) => file.startsWith(`${under}/`)) : all;
       const shown = files.slice(0, 400);
-      return { result: `${shown.join("\n") || "The open folder has no Markdown files."}${files.length > shown.length ? `\n[${files.length - shown.length} more not listed; use search_files.]` : ""}`, detail: count(files.length, "file") };
+      return { result: `${shown.join("\n") || (under ? `No files under "${under}".` : "The workspace has no text files.")}${files.length > shown.length ? `\n[${files.length - shown.length} more not listed; pass a folder, or use search_files.]` : ""}`, detail: `${under ? `${under} · ` : ""}${count(files.length, "file")}` };
     }
     case "search_files": {
       if (!query) throw new Error("query is empty.");
-      const hits = await invoke("search_files", { paths: workspaceFiles({ openable: true }), query });
+      const hits = await invoke("search_files", { paths: workspaceFiles().filter((file) => !/\.pdf$/i.test(file)), query });
       const shown = hits.slice(0, 60);
       return { result: shown.length ? shown.map((hit) => `${displayPath(hit.path)}:${hit.line}: ${hit.text}`).join("\n") : "No matches.", detail: `“${query}” · ${count(hits.length, "match")}` };
     }
     case "read_file": {
-      const want = String(args.path || "").trim().replace(/^\.[\\/]/, "");
-      const path = workspaceFiles({ openable: true }).find((file) => file === want || displayPath(file) === want);
-      if (!path) throw new Error("No such Markdown file in the open folder. Call list_files for valid paths.");
-      const out = numberedLines(path === state.path ? text : await invoke("read_file", { path }), args.start_line, args.end_line);
+      const path = resolveWorkspaceFile(args.path);
+      if (!path) throw new Error("No such file in the workspace. Call list_files for valid paths.");
+      if (/\.pdf$/i.test(path)) throw new Error("That is a PDF, not a text file.");
+      const out = numberedLines(await workspaceText(path), args.start_line, args.end_line);
       return { result: `${displayPath(path)}\n${out.text}`, detail: `${displayPath(path)} · lines ${out.from}–${out.to}` };
     }
     case "remember": {
@@ -3740,8 +3845,87 @@ el.aiComposer.addEventListener("submit", (e) => {
   e.preventDefault();
   sendAiMessage(el.aiInput.value);
 });
-el.aiInput.addEventListener("input", aiAutoGrow);
+// The @ popup: files and folders of the workspace, filtered by what follows the "@".
+const mentionMenu = { items: [], active: 0, start: 0 };
+const MENTION_ROWS = 30;
+
+function hideMentionMenu() {
+  el.mentionMenu.hidden = true;
+  el.aiInput.setAttribute("aria-expanded", "false");
+  el.aiInput.removeAttribute("aria-activedescendant");
+}
+
+function setActiveMention(i) {
+  const rows = el.mentionMenu.children;
+  if (!mentionMenu.items.length) return;
+  mentionMenu.active = (i + mentionMenu.items.length) % mentionMenu.items.length;
+  for (const [j, row] of [...rows].entries()) row.setAttribute("aria-selected", String(j === mentionMenu.active));
+  rows[mentionMenu.active].scrollIntoView({ block: "nearest" });
+  el.aiInput.setAttribute("aria-activedescendant", rows[mentionMenu.active].id);
+}
+
+function updateMentionMenu() {
+  const at = el.aiInput.selectionStart === el.aiInput.selectionEnd ? mentionAt(el.aiInput.value, el.aiInput.selectionStart) : null; // markctx.js
+  if (!at) return hideMentionMenu();
+  const q = at.query.toLowerCase();
+  const open = new Set(state.tabs.map(tabPath));
+  mentionMenu.start = at.start;
+  mentionMenu.items = mentionCandidates()
+    .map((c, i) => {
+      const label = c.label.toLowerCase();
+      const name = label.replace(/\/$/, "").split("/").pop();
+      // A hit in the file name beats one spread over the path; open tabs lead when nothing is typed yet.
+      const s = q ? Math.max(name.includes(q) ? 1000 - name.length : -1, fuzzyScore(label, q)) : open.has(c.path) ? 2 : c.dir ? 0 : 1;
+      return { c, i, s };
+    })
+    .filter((x) => x.s >= 0)
+    .sort((a, b) => b.s - a.s || a.c.label.length - b.c.label.length || a.i - b.i)
+    .slice(0, MENTION_ROWS)
+    .map((x) => x.c);
+  if (!mentionMenu.items.length) return hideMentionMenu();
+  el.mentionMenu.innerHTML = mentionMenu.items.map((c, i) => {
+    const trimmed = c.label.replace(/\/$/, "");
+    const cutAt = trimmed.lastIndexOf("/") + 1;
+    return `<div class="mention-opt" role="option" id="app-mention-opt-${i}" data-i="${i}" aria-selected="false" title="${escapeHtml(c.label)}">
+      ${svg(c.dir ? "folder" : "file")}<span class="mention-name">${highlight(trimmed.slice(cutAt) + (c.dir ? "/" : ""), at.query)}</span>
+      <span class="mention-dir">${escapeHtml(trimmed.slice(0, cutAt))}</span></div>`;
+  }).join("");
+  el.mentionMenu.hidden = false;
+  el.aiInput.setAttribute("aria-expanded", "true");
+  // Above the composer, as wide as the input row.
+  const r = el.aiInput.closest(".ai-input-row").getBoundingClientRect();
+  Object.assign(el.mentionMenu.style, { left: `${r.left}px`, width: `${r.width}px`, top: `${Math.max(4, r.top - 6 - el.mentionMenu.offsetHeight)}px` });
+  setActiveMention(0);
+}
+
+function chooseMention(i) {
+  const c = mentionMenu.items[i];
+  if (!c) return;
+  const v = el.aiInput.value;
+  const insert = `@${/\s/.test(c.label) ? `"${c.label}"` : c.label} `;
+  el.aiInput.value = v.slice(0, mentionMenu.start) + insert + v.slice(el.aiInput.selectionStart);
+  const caret = mentionMenu.start + insert.length;
+  el.aiInput.setSelectionRange(caret, caret);
+  hideMentionMenu();
+  aiAutoGrow();
+}
+
+el.mentionMenu.addEventListener("mousedown", (e) => {
+  e.preventDefault(); // keep focus in the input
+  const opt = e.target.closest(".mention-opt");
+  if (opt) chooseMention(Number(opt.dataset.i));
+});
+el.aiInput.addEventListener("blur", hideMentionMenu);
+el.aiInput.addEventListener("click", updateMentionMenu);
+el.aiInput.addEventListener("keyup", (e) => { if (/^(Arrow(Left|Right)|Home|End)$/.test(e.key)) updateMentionMenu(); });
+
+el.aiInput.addEventListener("input", () => { aiAutoGrow(); updateMentionMenu(); });
 el.aiInput.addEventListener("keydown", (e) => {
+  if (!el.mentionMenu.hidden && !e.isComposing) {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") { e.preventDefault(); return setActiveMention(mentionMenu.active + (e.key === "ArrowDown" ? 1 : -1)); }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); return chooseMention(mentionMenu.active); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return hideMentionMenu(); }
+  }
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
     sendAiMessage(el.aiInput.value);

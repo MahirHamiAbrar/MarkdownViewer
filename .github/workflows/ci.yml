@@ -38,6 +38,7 @@ jobs:
         run: |
           node --check src/main.js
           node src/mdsource.js
+          node src/markctx.js
           bash -n install.sh
       - name: Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
