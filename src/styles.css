@@ -605,7 +605,8 @@ kbd {
 .row + .row { border-top: 1px solid var(--border-subtle); }
 .row-label { font-weight: 500; }
 .row-desc { color: var(--text-secondary); font-size: .92rem; }
-.row .segmented { min-width: 200px; }
+.row .segmented { min-width: 200px; flex: none; }
+.row .segmented > button { white-space: nowrap; }
 /* Nine themes don't fit beside the label: wrap the picker onto its own full-width line, two rows if needed. */
 .row:has(> [data-setting="theme"]) { flex-wrap: wrap; }
 .row:has(> [data-setting="theme"]) > :first-child { flex: 1 1 180px; }
