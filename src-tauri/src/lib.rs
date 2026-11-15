@@ -9,13 +9,17 @@ use comrak::adapters::SyntaxHighlighterAdapter;
 use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use comrak::options::Plugins;
 use comrak::{markdown_to_html_with_plugins, Options};
-use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 mod ai;
+mod anthropic;
 mod chats;
+mod cli;
+mod fsutil;
 mod highlights;
+mod providers;
 mod web_search;
+mod workspace;
 
 /// Syntect is the slowest step of a render; the preview re-renders on every edit, so
 /// unchanged code blocks reuse their highlighted HTML.
@@ -65,12 +69,12 @@ static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
         .add_tag_attributes("input", ["type", "checked", "disabled"])
         .add_tag_attributes("a", ["aria-label", "data-heading-content"])
         .add_tag_attributes("img", ["width", "height"])
+        // Math from comrak's `math_dollars`/`math_code`; KaTeX renders it in the frontend.
+        .add_tag_attributes("span", ["data-math-style"])
+        .add_tag_attributes("code", ["data-math-style"])
         .link_rel(None);
     b
 });
-
-const MD_EXTENSIONS: [&str; 3] = ["md", "markdown", "mdx"];
-const SKIP_DIRS: [&str; 3] = ["node_modules", "target", "dist"];
 
 fn options() -> Options<'static> {
     let mut o = Options::default();
@@ -80,6 +84,8 @@ fn options() -> Options<'static> {
     o.extension.tasklist = true;
     o.extension.footnotes = true;
     o.extension.alerts = true;
+    o.extension.math_dollars = true; // $inline$ and $$display$$
+    o.extension.math_code = true; // $`inline`$ and ```math blocks
     o.extension.header_id_prefix = Some(String::new());
     // Raw HTML is allowed through comrak and then sanitized by ammonia.
     o.render.r#unsafe = true;
@@ -119,13 +125,85 @@ fn read_file(path: String) -> Result<String, String> {
 
 #[tauri::command(async)]
 fn write_file(path: String, contents: String) -> Result<(), String> {
-    fs::write(&path, contents).map_err(|e| e.to_string())
+    fsutil::atomic_write(Path::new(&path), contents.as_bytes(), false).map_err(|e| e.to_string())
 }
 
+fn draft_file(dir: &Path, id: &str) -> Result<std::path::PathBuf, String> {
+    if !(1..=64).contains(&id.len()) || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return Err("Invalid draft id.".into());
+    }
+    Ok(dir.join("drafts").join(format!("{id}.json")))
+}
+
+/// Unsaved text, kept so a crash or power cut does not lose it: `{ path, text, savedAt }`.
+#[tauri::command(async)]
+fn draft_save(app: tauri::AppHandle, id: String, json: String) -> Result<(), String> {
+    if json.len() > 20_000_000 || !serde_json::from_str::<serde_json::Value>(&json).is_ok_and(|v| v.is_object()) {
+        return Err("Invalid draft.".into());
+    }
+    let file = draft_file(&fsutil::ensure_app_dir(&app)?, &id)?;
+    fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
+    fsutil::atomic_write(&file, json.as_bytes(), true).map_err(|e| e.to_string())
+}
+
+#[tauri::command(async)]
+fn draft_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    match fs::remove_file(draft_file(&fsutil::app_dir(&app)?, &id)?) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.to_string()),
+        _ => Ok(()),
+    }
+}
+
+/// Every draft left behind, as `[id, json]` pairs.
+#[tauri::command(async)]
+fn drafts_list(app: tauri::AppHandle) -> Vec<(String, String)> {
+    let Ok(dir) = fsutil::app_dir(&app) else { return vec![] };
+    let Ok(entries) = fs::read_dir(dir.join("drafts")) else { return vec![] };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .filter_map(|p| Some((p.file_stem()?.to_str()?.to_owned(), fs::read_to_string(&p).ok()?)))
+        .collect()
+}
+
+/// Open requests waiting for their window's frontend to boot, by window label.
+#[derive(Default)]
+struct PendingOpens(Mutex<HashMap<String, cli::OpenRequest>>);
+
+/// Label of the window focused last: where a file opened from the terminal goes.
+struct LastFocused(Mutex<String>);
+
+/// What this window was launched to open, handed over once.
 #[tauri::command]
-fn initial_file() -> Option<String> {
-    let arg = std::env::args().nth(1)?;
-    fs::canonicalize(arg).ok().map(|p| p.to_string_lossy().into_owned())
+fn initial_open(window: tauri::WebviewWindow, pending: tauri::State<PendingOpens>) -> Option<cli::OpenRequest> {
+    pending.0.lock().unwrap().remove(window.label())
+}
+
+/// Sorts dropped paths into files and folders.
+#[tauri::command(async)]
+fn classify_paths(paths: Vec<String>) -> cli::OpenRequest {
+    // "--" first: a dropped path is never an option.
+    cli::parse(std::iter::once("--".to_string()).chain(paths), Path::new("/")).unwrap_or_default()
+}
+
+/// Routes a launch to a window: its own for folders and `-n`, otherwise the one used last.
+fn dispatch(app: &tauri::AppHandle, req: cli::OpenRequest) {
+    let windows = app.webview_windows();
+    let last = app.state::<LastFocused>().0.lock().unwrap().clone();
+    let target = if req.wants_window() { None } else { windows.get(&last).or_else(|| windows.values().next()) };
+    match target {
+        Some(window) => {
+            let _ = app.emit_to(window.label(), "open-request", &req);
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        None => {
+            if let Err(err) = open_window(app, Some(req)) {
+                eprintln!("markdowneditor: {err}");
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -133,19 +211,60 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
-#[tauri::command]
-fn print_page(webview: tauri::Webview) -> Result<(), String> {
-    webview.print().map_err(|e| e.to_string())
+/// Raw bytes for the PDF viewer, sent without JSON encoding.
+#[tauri::command(async)]
+fn read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    fs::read(&path).map(tauri::ipc::Response::new).map_err(|e| e.to_string())
 }
 
-/// Opens another blank window alongside the current one. `?fresh=1` stops the
-/// frontend from restoring the last file or the CLI-argument file in it.
+/// Writes the page straight to a PDF at `path`, no print dialog. Resolves once the file is complete.
+#[cfg(target_os = "linux")]
 #[tauri::command]
-fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+async fn export_pdf(webview: tauri::Webview, path: String) -> Result<bool, String> {
+    use webkit2gtk::PrintOperationExt;
+
+    let uri = gtk::glib::filename_to_uri(&path, None).map_err(|e| e.to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    webview
+        .with_webview(move |w| {
+            let settings = gtk::PrintSettings::new();
+            settings.set_printer("Print to File");
+            settings.set(gtk::PRINT_SETTINGS_OUTPUT_FILE_FORMAT, Some("pdf"));
+            settings.set(gtk::PRINT_SETTINGS_OUTPUT_URI, Some(uri.as_str()));
+            let op = webkit2gtk::PrintOperation::new(&w.inner());
+            op.set_print_settings(&settings);
+            // `failed` is followed by `finished`; the receiver keeps the first message.
+            let failed = tx.clone();
+            op.connect_failed(move |_, e| drop(failed.send(Err(e.to_string()))));
+            op.connect_finished(move |_| drop(tx.send(Ok(()))));
+            op.print();
+        })
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|()| true)
+}
+
+// ponytail: Windows and macOS still go through the system print dialog (returns false);
+// use WebView2 PrintToPdf / WKWebView createPDF when those platforms get release builds.
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+async fn export_pdf(webview: tauri::Webview, path: String) -> Result<bool, String> {
+    let _ = path;
+    webview.print().map(|()| false).map_err(|e| e.to_string())
+}
+
+/// Opens another window alongside the current ones, blank or showing `req`. `?fresh=1` stops
+/// the frontend from restoring the last session in it.
+fn open_window(app: &tauri::AppHandle, req: Option<cli::OpenRequest>) -> Result<(), String> {
     let windows = app.webview_windows();
     let label = (2..).map(|n| format!("main-{n}")).find(|l| !windows.contains_key(l)).unwrap();
-    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html?fresh=1".into()))
-        .title("Markdown")
+    if let Some(req) = req {
+        app.state::<PendingOpens>().0.lock().unwrap().insert(label.clone(), req);
+    }
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html?fresh=1".into()))
+        .title("MarkdownEditor")
         .inner_size(1180., 780.)
         .min_inner_size(640., 420.)
         .decorations(false)
@@ -154,6 +273,11 @@ fn new_window(app: tauri::AppHandle) -> Result<(), String> {
         .build()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_window(&app, None)
 }
 
 fn font_families(fc_list: &str) -> Vec<String> {
@@ -173,117 +297,51 @@ fn list_fonts() -> Vec<String> {
         .unwrap_or_default()
 }
 
-#[derive(Serialize, Debug)]
-struct TreeNode {
-    name: String,
-    path: String,
-    children: Option<Vec<TreeNode>>, // None = file
-}
-
-fn is_markdown(p: &Path) -> bool {
-    p.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| MD_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
-}
-
-// ponytail: depth 8 / 5000 files cap keeps huge trees responsive; lazy-load per folder if users need more.
-fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Vec<TreeNode> {
-    let Ok(entries) = fs::read_dir(dir) else { return vec![] };
-    let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();
-    entries.sort_by_key(|p| (!p.is_dir(), p.file_name().map(|n| n.to_ascii_lowercase())));
-    let mut out = vec![];
-    for p in entries {
-        if *budget == 0 {
-            break;
-        }
-        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if p.is_dir() {
-            if depth == 0 || SKIP_DIRS.contains(&name.as_str()) {
-                continue;
-            }
-            let children = walk(&p, depth - 1, budget);
-            if !children.is_empty() {
-                out.push(TreeNode { name, path: p.to_string_lossy().into_owned(), children: Some(children) });
-            }
-        } else if is_markdown(&p) {
-            *budget -= 1;
-            out.push(TreeNode { name, path: p.to_string_lossy().into_owned(), children: None });
-        }
-    }
-    out
-}
-
-#[tauri::command(async)]
-fn list_markdown(dir: String) -> Vec<TreeNode> {
-    walk(Path::new(&dir), 8, &mut 5000)
-}
-
-#[derive(Serialize, Debug)]
-struct Hit {
-    path: String,
-    line: usize,
-    text: String,
-}
-
-fn snippet(line: &str, at: usize, len: usize) -> String {
-    let start = line[..at].char_indices().rev().nth(40).map_or(0, |(i, _)| i);
-    let end = line[at + len..].char_indices().nth(80).map_or(line.len(), |(i, _)| at + len + i);
-    let mut s = line[start..end].trim().to_string();
-    if start > 0 {
-        s.insert(0, '…');
-    }
-    if end < line.len() {
-        s.push('…');
-    }
-    s
-}
-
-#[tauri::command(async)]
-fn search_files(paths: Vec<String>, query: String) -> Vec<Hit> {
-    let q = query.trim().to_lowercase();
-    if q.is_empty() {
-        return vec![];
-    }
-    let mut hits = vec![];
-    let mut seen = HashSet::new();
-    for path in paths {
-        if !seen.insert(path.clone()) {
-            continue;
-        }
-        if fs::metadata(&path).map_or(true, |m| m.len() > 2_000_000) {
-            continue;
-        }
-        let Ok(text) = fs::read_to_string(&path) else { continue };
-        let mut per_file = 0;
-        for (i, line) in text.lines().enumerate() {
-            let lower = line.to_lowercase();
-            // Lowercasing can change byte lengths for some scripts; only slice when lengths agree.
-            if let Some(at) = lower.find(&q) {
-                let text = if lower.len() == line.len() { snippet(line, at, q.len()) } else { line.trim().to_string() };
-                hits.push(Hit { path: path.clone(), line: i + 1, text });
-                per_file += 1;
-                if per_file == 5 {
-                    break;
-                }
-            }
-        }
-        if hits.len() >= 200 {
-            hits.truncate(200);
-            break;
-        }
-    }
-    hits
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
-        .setup(|_| {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        return println!("{}", cli::HELP);
+    }
+    if args.iter().any(|a| a == "-v" || a == "--version") {
+        return println!("markdowneditor {}", env!("CARGO_PKG_VERSION"));
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let request = cli::parse(args, &cwd).unwrap_or_else(|err| {
+        eprintln!("markdowneditor: {err}\n\n{}", cli::HELP);
+        std::process::exit(2);
+    });
+
+    let mut builder = tauri::Builder::default();
+    // ponytail: --wait runs as its own process and ends with its window, so the caller blocks on
+    // the whole window rather than one tab; signal tab-close back to a waiting launcher if needed.
+    if !request.wait {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            // A later launch hands its arguments to this process and exits.
+            let req = cli::parse(args.into_iter().skip(1), Path::new(&cwd)).unwrap_or_default();
+            dispatch(app, req);
+        }));
+    }
+    builder
+        .manage(PendingOpens(Mutex::new(HashMap::from([("main".to_string(), request)]))))
+        .manage(LastFocused(Mutex::new("main".into())))
+        .manage(workspace::Watchers::default())
+        .on_window_event(|window, event| {
+            match event {
+                tauri::WindowEvent::Focused(true) => *window.state::<LastFocused>().0.lock().unwrap() = window.label().to_string(),
+                tauri::WindowEvent::Destroyed => drop(window.state::<workspace::Watchers>().0.lock().unwrap().remove(window.label())),
+                _ => {}
+            }
+        })
+        .setup(|app| {
             // Load syntect's syntaxes before the first document arrives.
             std::thread::spawn(|| render_markdown("```rust\nfn main() {}\n```".into()));
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                if let Ok(dir) = fsutil::app_dir(&handle) {
+                    providers::migrate_legacy_key(&dir);
+                }
+            });
             Ok(())
         })
         .plugin(tauri_plugin_dialog::init())
@@ -293,18 +351,29 @@ pub fn run() {
             render_markdown,
             read_file,
             write_file,
-            initial_file,
+            initial_open,
+            classify_paths,
             app_version,
-            print_page,
+            read_bytes,
+            export_pdf,
             new_window,
-            list_markdown,
-            search_files,
+            workspace::list_workspace,
+            workspace::search_files,
+            workspace::watch_paths,
             list_fonts,
             ai::ai_chat,
             ai::ai_cancel,
-            ai::ai_title,
-            ai::ai_status,
-            ai::ai_set_key,
+            ai::ai_complete,
+            ai::memory_load,
+            ai::memory_save,
+            providers::providers_list,
+            providers::provider_save,
+            providers::provider_delete,
+            providers::provider_set_key,
+            providers::provider_fetch_models,
+            draft_save,
+            draft_delete,
+            drafts_list,
             chats::chats_list,
             chats::chat_load,
             chats::chat_save,
@@ -313,7 +382,8 @@ pub fn run() {
             highlights::highlights_save,
             web_search::search_status,
             web_search::set_search_config,
-            web_search::set_search_direct
+            web_search::set_search_direct,
+            web_search::web_search_run
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -340,6 +410,12 @@ mod tests {
         }
 
         let fm = render_markdown("---\nname: x\n---\n# Body".into());
+        let math = render_markdown("$a^2$ and $$\\sum x$$ and $5 or $6\n\n```math\nx\n```".into());
+        assert!(math.contains(r#"<span data-math-style="inline">a^2</span>"#), "{math}");
+        assert!(math.contains(r#"<span data-math-style="display">\sum x</span>"#), "{math}");
+        assert!(math.contains(r#"class="language-math" data-math-style="display""#), "{math}");
+        assert!(math.contains("$5 or $6"), "prices stay text: {math}");
+
         assert!(fm.contains("name") && fm.contains("language-yaml") && fm.contains("front-matter") && fm.contains(r#"id="body""#), "{fm}");
     }
 
@@ -348,26 +424,5 @@ mod tests {
         assert_eq!(font_families("Noto Sans\ninter\n\nNoto Sans\nArial\n"), ["Arial", "inter", "Noto Sans"]);
         let html = render_markdown("```rust\nfn a() {}\n```".into());
         assert_eq!(html, render_markdown("```rust\nfn a() {}\n```".into()), "cached highlight matches");
-    }
-
-    #[test]
-    fn tree_and_search() {
-        let root = std::env::temp_dir().join(format!("mdviewer-test-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        fs::create_dir_all(root.join("docs")).unwrap();
-        fs::create_dir_all(root.join("empty")).unwrap();
-        fs::write(root.join("docs/Guide.md"), "intro\nThe Quick fox\n").unwrap();
-        fs::write(root.join("notes.txt"), "x").unwrap();
-
-        let tree = list_markdown(root.to_string_lossy().into());
-        assert_eq!(tree.len(), 1, "{tree:?}");
-        assert_eq!(tree[0].name, "docs");
-
-        let file = root.join("docs/Guide.md").to_string_lossy().into_owned();
-        let hits = search_files(vec![file], "quick".into());
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].line, 2);
-        assert_eq!(hits[0].text, "The Quick fox");
-        fs::remove_dir_all(root).unwrap();
     }
 }

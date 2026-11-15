@@ -1,0 +1,197 @@
+name: Release
+
+# Every push to main builds Linux (.deb, .AppImage), macOS (.dmg, universal) and Windows
+# (.msi, setup .exe) packages and publishes them, signed and checksummed, as a new release.
+# Version: the app version in tauri.conf.json when it is higher than the latest v* tag (a
+# manual minor or major bump), otherwise the latest tag with its patch number plus one.
+# The workflow creates the tag itself.
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+  workflow_dispatch:
+
+# One release at a time, so two pushes never pick the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-22.04
+    outputs:
+      version: ${{ steps.pick.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # tags and history for the version and the notes
+      - name: Pick the version and the notes
+        id: pick
+        run: |
+          base="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          latest="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          latest="${latest#v}"
+          if [ -z "$latest" ] || { [ "$base" != "$latest" ] && [ "$(printf '%s\n%s\n' "$base" "$latest" | sort -V | tail -1)" = "$base" ]; }; then
+            version="$base"
+          else
+            IFS=. read -r major minor patch <<< "$latest"
+            version="$major.$minor.$((patch + 1))"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $version (app version $base, latest tag ${latest:-none})"
+
+          # Notes: the CHANGELOG.md section for this version, else "Unreleased", else the commits.
+          section() {
+            awk -v h="## [$1]" '
+              /^## \[/ { on = (index($0, h) == 1); next }
+              on { print }
+            ' CHANGELOG.md | sed -e '/./,$!d'
+          }
+          section "$version" > notes.md
+          [ -s notes.md ] || section Unreleased > notes.md
+          [ -s notes.md ] || git log --format='- %s' ${latest:+"v$latest"..HEAD} > notes.md
+          cat notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # 22.04 (glibc 2.35) keeps the packages usable on Ubuntu 22.04+, Debian 12+ and derivatives.
+          - os: ubuntu-22.04
+            args: --bundles deb,appimage
+            out: src-tauri/target/release/bundle
+          - os: macos-latest
+            args: --target universal-apple-darwin --bundles dmg
+            out: src-tauri/target/universal-apple-darwin/release/bundle
+          - os: windows-latest
+            args: --bundles msi,nsis
+            out: src-tauri/target/release/bundle
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Import the signing key
+        if: runner.os == 'Linux'
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          [ -n "$GPG_PRIVATE_KEY" ] || { echo "::error::Add the GPG_PRIVATE_KEY and GPG_PASSPHRASE repository secrets; releases must be signed."; exit 1; }
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')" >> "$GITHUB_ENV"
+
+      - name: System libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev libxdo-dev patchelf
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: npm ci
+      - name: Set the release version
+        shell: bash
+        run: |
+          node -e '
+            const fs = require("fs"), p = "src-tauri/tauri.conf.json";
+            const conf = JSON.parse(fs.readFileSync(p, "utf8"));
+            conf.version = process.argv[1];
+            fs.writeFileSync(p, JSON.stringify(conf, null, 2) + "\n");
+          ' "${{ needs.version.outputs.version }}"
+      - name: Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      # SIGN* only matter to the AppImage bundler (signed in place); other platforms ignore them.
+      - name: Build
+        shell: bash
+        env:
+          SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
+          SIGN_KEY: ${{ env.GPG_KEY_ID }}
+          APPIMAGETOOL_SIGN_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          APPIMAGETOOL_FORCE_SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: npx tauri build ${{ matrix.args }}
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir dist
+          find "${{ matrix.out }}" -maxdepth 2 -type f \
+            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp {} dist/ \;
+          ls -l dist
+          [ -n "$(ls dist)" ] || { echo "::error::No packages found under ${{ matrix.out }}"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # create the release
+      id-token: write # build provenance
+      attestations: write
+    env:
+      TAG: v${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: packages-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')" >> "$GITHUB_ENV"
+
+      - name: Sign and checksum
+        env:
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: |
+          cd dist
+          sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --local-user "$GPG_KEY_ID" --armor --detach-sign "$1"; }
+          files=$(ls)
+          for file in $files; do sign "$file"; done
+          sha256sum $files > SHA256SUMS
+          sign SHA256SUMS
+          ls -l
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.dmg
+            dist/*.msi
+            dist/*.exe
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" dist/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "MarkdownEditor $TAG" --notes-file notes.md

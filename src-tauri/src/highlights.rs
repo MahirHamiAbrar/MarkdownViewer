@@ -3,19 +3,11 @@ use std::path::{Path, PathBuf};
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
-use tauri::Manager;
 
 /// Highlight files are keyed by the absolute document path, so a document keeps its
 /// annotations wherever it moves to as long as the path is unchanged.
-fn app_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .home_dir()
-        .map(|h| h.join(".markdown-viewer-app"))
-        .map_err(|e| e.to_string())
-}
-
 fn highlights_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app_dir(app)?.join("highlights"))
+    Ok(crate::fsutil::app_dir(app)?.join("highlights"))
 }
 
 fn highlight_file(root: &Path, path: &str) -> Result<PathBuf, String> {
@@ -52,10 +44,7 @@ fn save_at(root: &Path, path: &str, json: &str) -> Result<(), String> {
     let file = highlight_file(root, path)?;
     let dir = file.parent().ok_or("Invalid highlights path.")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let tmp = file.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::fsutil::atomic_write(&file, json.as_bytes(), true).map_err(|e| e.to_string())
 }
 
 #[tauri::command(async)]

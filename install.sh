@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds Markdown (mdviewer) from source and installs it for the current user on Linux,
+# Builds MarkdownEditor from source and installs it for the current user on Linux,
 # registered as the default app for Markdown files.
 #
 #   ./install.sh              build + install into ~/.local
@@ -9,9 +9,10 @@
 #   PREFIX=/usr/local sudo -E ./install.sh   system-wide install
 set -euo pipefail
 
-APP_ID="dev.mhabrar.mdviewer"
+APP_ID="dev.mhabrar.markdowneditor"
+OLD_APP_ID="dev.mhabrar.mdviewer" # the app's id before it was renamed
 PREFIX="${PREFIX:-$HOME/.local}"
-BIN="$PREFIX/bin/mdviewer"
+BIN="$PREFIX/bin/markdowneditor"
 APPS="$PREFIX/share/applications"
 ICONS="$PREFIX/share/icons/hicolor"
 DESKTOP="$APPS/$APP_ID.desktop"
@@ -27,12 +28,18 @@ refresh_caches() {
   command -v gtk-update-icon-cache >/dev/null && gtk-update-icon-cache -q -f -t "$ICONS" 2>/dev/null || true
 }
 
-uninstall() {
-  say "Removing Markdown from $PREFIX"
-  rm -f "$BIN" "$DESKTOP" "$ICONS/scalable/apps/$APP_ID.svg"
-  for size in 32x32 128x128 256x256; do rm -f "$ICONS/$size/apps/$APP_ID.png"; done
+remove_files() { # $1 = app id, $2 = binary
+  rm -f "$2" "$(dirname "$2")/mde" "$APPS/$1.desktop" "$ICONS/scalable/apps/$1.svg"
+  for size in 32x32 128x128 256x256; do rm -f "$ICONS/$size/apps/$1.png"; done
   local mimeapps="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
-  [[ -f "$mimeapps" ]] && sed -i "/=$APP_ID\.desktop;\?$/d; s/$APP_ID\.desktop;//g" "$mimeapps"
+  [[ -f "$mimeapps" ]] && sed -i "/=$1\.desktop;\?$/d; s/$1\.desktop;//g" "$mimeapps"
+  return 0
+}
+
+uninstall() {
+  say "Removing MarkdownEditor from $PREFIX"
+  remove_files "$APP_ID" "$BIN"
+  remove_files "$OLD_APP_ID" "$PREFIX/bin/mdviewer"
   refresh_caches
   say "Done."
 }
@@ -68,7 +75,9 @@ build() {
 
 install_files() {
   say "Installing into $PREFIX"
-  install -Dm755 "$ROOT/src-tauri/target/release/mdviewer" "$BIN"
+  remove_files "$OLD_APP_ID" "$PREFIX/bin/mdviewer" # an install from before the rename
+  install -Dm755 "$ROOT/src-tauri/target/release/markdowneditor" "$BIN"
+  ln -sf markdowneditor "$PREFIX/bin/mde" # short name for the terminal: mde notes/
   install -Dm644 "$ROOT/src-tauri/icons/32x32.png" "$ICONS/32x32/apps/$APP_ID.png"
   install -Dm644 "$ROOT/src-tauri/icons/128x128.png" "$ICONS/128x128/apps/$APP_ID.png"
   install -Dm644 "$ROOT/src-tauri/icons/128x128@2x.png" "$ICONS/256x256/apps/$APP_ID.png"
@@ -77,12 +86,12 @@ install_files() {
   cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Markdown
-GenericName=Markdown Viewer
+Name=MarkdownEditor
+GenericName=Markdown Editor
 Comment=A calm Markdown viewer and editor
-Exec=$BIN %f
+Exec=$BIN %F
 Icon=$APP_ID
-StartupWMClass=mdviewer
+StartupWMClass=markdowneditor
 Terminal=false
 Categories=Office;TextEditor;Utility;
 MimeType=$(IFS=';'; echo "${MIME_TYPES[*]}");
@@ -93,14 +102,14 @@ EOF
     xdg-mime default "$APP_ID.desktop" "${MIME_TYPES[@]}"
     say "Default app for Markdown: $(xdg-mime query default text/markdown)"
   else
-    say "xdg-mime not found; set Markdown as default for .md files in your file manager."
+    say "xdg-mime not found; set MarkdownEditor as default for .md files in your file manager."
   fi
 }
 
 case "${1:-}" in
   -h|--help) usage ;;
   --uninstall) uninstall ;;
-  --reinstall) build; uninstall; install_files; say "Reinstalled. Open any .md file, or run: $BIN" ;;
-  "") build; install_files; say "Installed. Open any .md file, or run: $BIN" ;;
+  --reinstall) build; uninstall; install_files; say "Reinstalled. Open any .md file, or run: mde <file or folder>" ;;
+  "") build; install_files; say "Installed. Open any .md file, or run: mde <file or folder>" ;;
   *) usage >&2; die "unknown option: $1" ;;
 esac

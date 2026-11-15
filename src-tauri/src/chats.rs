@@ -2,7 +2,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
-use tauri::Manager;
 
 /// Parent pointer for a forked conversation, flattened for the history tree.
 #[derive(Serialize, Debug)]
@@ -29,15 +28,8 @@ pub struct ChatSummary {
     pub forked_from: Option<ForkRef>,
 }
 
-fn app_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .home_dir()
-        .map(|h| h.join(".markdown-viewer-app"))
-        .map_err(|e| e.to_string())
-}
-
 fn chats_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    Ok(app_dir(app)?.join("chats"))
+    Ok(crate::fsutil::app_dir(app)?.join("chats"))
 }
 
 fn valid_id(id: &str) -> bool {
@@ -72,10 +64,7 @@ fn save_at(root: &Path, date: &str, id: &str, json: &str) -> Result<(), String> 
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
-    let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
-    Ok(())
+    crate::fsutil::atomic_write(&path, json.as_bytes(), true).map_err(|e| e.to_string())
 }
 
 fn load_at(root: &Path, date: &str, id: &str) -> Result<String, String> {

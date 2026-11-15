@@ -7,7 +7,7 @@ use base64::Engine;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 const DEFAULT_PROVIDERS: [&str; 4] = ["google", "bing", "duckduckgo", "mojeek"];
 const TOR_PROXY: &str = "socks5h://127.0.0.1:9050";
@@ -161,26 +161,6 @@ pub struct SearchResponse {
     pub attempts: u32,
 }
 
-pub fn tool_definition() -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": "web_search",
-            "description": "Search the web for current information, recent releases, prices, news, or facts you are unsure about. Returns titles, URLs, and snippets. Use it whenever the answer depends on up-to-date information.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "The search query."
-                    }
-                },
-                "required": ["query"]
-            }
-        }
-    })
-}
-
 fn normalize_providers(names: &[String]) -> Vec<String> {
     let mut out = Vec::new();
     for name in names {
@@ -201,15 +181,8 @@ fn normalize_providers(names: &[String]) -> Vec<String> {
     out
 }
 
-fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .home_dir()
-        .map(|home| home.join(".markdown-viewer-app"))
-        .map_err(|e| e.to_string())
-}
-
 fn config_path(app: &AppHandle) -> Result<PathBuf, String> {
-    Ok(app_dir(app)?.join("config.json"))
+    Ok(crate::fsutil::app_dir(app)?.join("config.json"))
 }
 
 fn read_config_value(app: &AppHandle) -> Value {
@@ -224,23 +197,9 @@ fn read_config_value(app: &AppHandle) -> Value {
 }
 
 fn write_config_value(app: &AppHandle, value: &Value) -> Result<(), String> {
-    let dir = app_dir(app)?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-    let path = dir.join("config.json");
+    let path = crate::fsutil::ensure_app_dir(app)?.join("config.json");
     let text = serde_json::to_string_pretty(value).map_err(|e| e.to_string())?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text).map_err(|e| e.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-    }
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    crate::fsutil::atomic_write(&path, text.as_bytes(), true).map_err(|e| e.to_string())
 }
 
 pub fn load_config(app: &AppHandle) -> SearchConfig {
@@ -327,6 +286,30 @@ pub fn set_search_config(app: AppHandle, proxy: Option<String>, allow_direct: bo
 pub fn set_search_direct(app: AppHandle, allow_direct: bool) -> Result<SearchStatus, String> {
     patch_search(&app, None, Some(allow_direct))?;
     Ok(status(&load_config(&app)))
+}
+
+#[derive(Serialize)]
+pub struct SearchRun {
+    /// Tool result text handed back to the model.
+    pub content: String,
+    /// One-line summary for the Actions trace.
+    pub detail: String,
+}
+
+/// The `web_search` tool, run by the webview's tool loop.
+#[tauri::command]
+pub async fn web_search_run(app: AppHandle, query: String) -> Result<SearchRun, String> {
+    let config = load_config(&app);
+    if !config.ready() {
+        return Err("Web search is not set up: configure a proxy or Tor, or allow direct search in Settings.".into());
+    }
+    let response = search(&config, &query).await?;
+    let count = response.results.len();
+    let mut detail = format!("{count} result{} · {}", if count == 1 { "" } else { "s" }, response.provider);
+    if response.attempts > 1 {
+        detail.push_str(&format!(" · {} attempts", response.attempts));
+    }
+    Ok(SearchRun { content: format_results(query.trim(), &response), detail })
 }
 
 /// Run a search through the configured providers. Never falls back to a direct
