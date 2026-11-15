@@ -63,18 +63,24 @@ jobs:
       - name: Build
         shell: bash
         env:
+          # Signs the in-app updater payloads (minisign); the public key is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
           SIGN_KEY: ${{ env.GPG_KEY_ID }}
           APPIMAGETOOL_SIGN_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           APPIMAGETOOL_FORCE_SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: npx tauri build ${{ inputs.args }}
+        run: |
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "::error::Add the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secrets; auto-update payloads must be signed."; exit 1; }
+          npx tauri build ${{ inputs.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       - name: Collect
         shell: bash
         run: |
           mkdir dist
           find "${{ inputs.out }}" -maxdepth 2 -type f \
-            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \
+               -o -name '*.app.tar.gz' -o -name '*.AppImage.sig' -o -name '*-setup.exe.sig' -o -name '*.app.tar.gz.sig' \) \
             -exec cp {} dist/ \;
           ls -l dist
           [ -n "$(ls dist)" ] || { echo "::error::No packages found under ${{ inputs.out }}"; exit 1; }

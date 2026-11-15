@@ -148,8 +148,9 @@ const store = {
 };
 
 const DEFAULT_SETTINGS = {
-  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiProvider: "", aiModel: "", aiMemory: "on", aiEdits: "ask", webSearch: true, highlightCount: true, highlightJump: "latest",
+  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiProvider: "", aiModel: "", aiMemory: "on", aiEdits: "ask", webSearch: true, highlightCount: true, highlightJump: "latest", blur: BLUR_DEFAULT,
   lineHeight: "normal", align: "left", codeWrap: "scroll", tabSize: "2", autosave: "off", startup: "last",
+  updateCheck: true, updateAuto: true,
 };
 const READ_WIDTHS = { narrow: "640px", normal: "760px", wide: "980px", full: "100%" };
 
@@ -267,6 +268,7 @@ function applySettings() {
   const s = state.settings;
   applyTheme(s.theme, el.root); // theme.js
   el.root.dataset.accent = s.accent;
+  el.root.toggleAttribute("data-blur", s.blur !== false); // styles.css: frosted vs solid popups
   el.root.style.setProperty("--fs-root", `${s.fontSize}px`);
   el.root.style.setProperty("--read-w", READ_WIDTHS[s.width] || READ_WIDTHS.normal);
   for (const key of ["lineHeight", "align", "codeWrap", "tabSize"]) el.root.dataset[key] = s[key]; // styled in styles.css
@@ -1084,7 +1086,7 @@ async function renderMermaid(block) {
     id = `mermaid-${++mermaidSeq}`;
     const { svg: out } = await m.render(id, block.dataset.src);
     if (!block.isConnected) return; // replaced by a newer render meanwhile
-    block.innerHTML = out;
+    block.innerHTML = out + `<button class="icon-btn zoom-btn" data-tip="Expand" aria-label="Expand diagram">${svg("expand")}</button>`;
     block.classList.remove("mermaid-error");
   } catch (err) {
     document.getElementById(`d${id}`)?.remove(); // Mermaid can leave its scratch node behind on a parse error
@@ -1098,6 +1100,151 @@ async function renderMermaid(block) {
     block.classList.add("mermaid-error");
   }
 }
+
+// ---------- expanded view (images and diagrams): drag to pan, wheel/pinch to zoom ----------
+const lb = { dlg: $(".dlg-zoom"), s: 1, x: 0, y: 0, w: 0, h: 0, fit: 1, drag: null };
+lb.stage = $(".zoom-stage", lb.dlg);
+lb.box = $(".zoom-content", lb.dlg);
+lb.level = $(".zoom-level", lb.dlg);
+const ZOOM_MIN = 0.05, ZOOM_MAX = 16;
+
+function openLightbox(source) {
+  let node, w, h;
+  if (source.tagName === "IMG") {
+    if (!source.naturalWidth) return; // not loaded / broken
+    node = new Image();
+    node.src = source.currentSrc || source.src;
+    node.alt = source.alt;
+    [w, h] = [source.naturalWidth, source.naturalHeight];
+  } else {
+    const svgEl = $(":scope > svg", source);
+    if (!svgEl) return;
+    node = svgEl.cloneNode(true);
+    const vb = svgEl.viewBox.baseVal;
+    const r = svgEl.getBoundingClientRect();
+    [w, h] = vb?.width ? [vb.width, vb.height] : [r.width, r.height];
+    node.removeAttribute("style"); // drop Mermaid's max-width cap
+    node.removeAttribute("height");
+  }
+  node.draggable = false;
+  lb.box.replaceChildren(node);
+  Object.assign(lb, { w, h, vector: node.tagName !== "IMG" });
+  lb.dlg.showModal();
+  lb.dlg.focus(); // not the first toolbar button: no stray focus ring
+  lbFit(false);
+  lb.dlg.classList.remove("hint-gone");
+  clearTimeout(lb.hintTimer);
+  lb.hintTimer = setTimeout(() => lb.dlg.classList.add("hint-gone"), 2500);
+}
+
+function lbApply(animate = true) {
+  lb.box.classList.toggle("animate", animate);
+  lb.box.style.transform = `translate(${lb.x}px, ${lb.y}px)`;
+  // Size, not scale(): the browser redraws SVGs and big images crisply at every zoom level.
+  lb.box.style.width = `${lb.w * lb.s}px`;
+  lb.box.style.height = `${lb.h * lb.s}px`;
+  lb.level.textContent = `${Math.round(lb.s * 100)}%`;
+}
+
+function lbFit(animate = true) {
+  const r = lb.stage.getBoundingClientRect();
+  const fit = Math.min((r.width - 64) / lb.w, (r.height - 112) / lb.h);
+  lb.fit = lb.vector ? fit : Math.min(1, fit); // photos never blow up past 100% to fit
+  lb.s = Math.max(ZOOM_MIN, lb.fit);
+  lb.x = (r.width - lb.w * lb.s) / 2;
+  lb.y = (r.height - lb.h * lb.s) / 2;
+  lbApply(animate);
+}
+
+/** Zooms to `s`, keeping the stage point (cx, cy) fixed under the cursor. */
+function lbTo(s, cx, cy, animate = true) {
+  const r = lb.stage.getBoundingClientRect();
+  cx ??= r.width / 2; cy ??= r.height / 2;
+  s = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, s));
+  lb.x = cx - (cx - lb.x) * (s / lb.s);
+  lb.y = cy - (cy - lb.y) * (s / lb.s);
+  lb.s = s;
+  lbApply(animate);
+}
+
+lb.stage.addEventListener("wheel", (e) => {
+  e.preventDefault();
+  const r = lb.stage.getBoundingClientRect();
+  // Mouse wheels and trackpad pinches (ctrlKey) both zoom; a plain two-finger trackpad swipe pans.
+  if (!e.ctrlKey && e.deltaMode === 0 && Math.abs(e.deltaY) < 40 && e.deltaX !== 0) {
+    lb.x -= e.deltaX; lb.y -= e.deltaY;
+    return lbApply(false);
+  }
+  const unit = e.deltaMode === 1 ? 33 : e.deltaMode === 2 ? 400 : 1;
+  lbTo(lb.s * Math.exp(-e.deltaY * unit * (e.ctrlKey ? 0.01 : 0.0018)), e.clientX - r.left, e.clientY - r.top, false);
+}, { passive: false });
+
+lb.stage.addEventListener("pointerdown", (e) => {
+  if (e.button !== 0) return;
+  lb.drag = { x: e.clientX - lb.x, y: e.clientY - lb.y, sx: e.clientX, sy: e.clientY, moved: false };
+  lb.stage.setPointerCapture(e.pointerId);
+  lb.stage.classList.add("dragging");
+});
+lb.stage.addEventListener("pointermove", (e) => {
+  if (!lb.drag) return;
+  if (Math.abs(e.clientX - lb.drag.sx) + Math.abs(e.clientY - lb.drag.sy) > 3) lb.drag.moved = true;
+  lb.x = e.clientX - lb.drag.x;
+  lb.y = e.clientY - lb.drag.y;
+  lbApply(false);
+});
+const lbDragEnd = (e) => {
+  if (!lb.drag) return;
+  const { moved } = lb.drag;
+  lb.drag = null;
+  lb.stage.classList.remove("dragging");
+  // A plain click on the empty backdrop closes, like a lightbox.
+  if (!moved && e.type === "pointerup" && !e.target.closest(".zoom-content")) lb.dlg.close();
+};
+lb.stage.addEventListener("pointerup", lbDragEnd);
+lb.stage.addEventListener("pointercancel", lbDragEnd);
+
+lb.stage.addEventListener("dblclick", (e) => {
+  const r = lb.stage.getBoundingClientRect();
+  const near = (a, b) => Math.abs(a - b) < 0.01;
+  if (near(lb.s, lb.fit) || lb.s < lb.fit) lbTo(Math.max(lb.fit * 2.5, 1), e.clientX - r.left, e.clientY - r.top);
+  else lbFit();
+});
+
+lb.dlg.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-zoom]");
+  if (!b) return;
+  const act = b.dataset.zoom;
+  if (act === "in") lbTo(lb.s * 1.4);
+  else if (act === "out") lbTo(lb.s / 1.4);
+  else if (act === "actual") lbTo(1);
+  else if (act === "fit") lbFit();
+  else lb.dlg.close();
+});
+
+lb.dlg.addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) { if (/^[=+\-0]$/.test(e.key)) e.preventDefault(); else return; }
+  const step = 60;
+  const keys = {
+    "+": () => lbTo(lb.s * 1.25), "=": () => lbTo(lb.s * 1.25), "-": () => lbTo(lb.s / 1.25),
+    "0": () => lbFit(), "1": () => lbTo(1),
+    ArrowLeft: () => { lb.x += step; lbApply(); }, ArrowRight: () => { lb.x -= step; lbApply(); },
+    ArrowUp: () => { lb.y += step; lbApply(); }, ArrowDown: () => { lb.y -= step; lbApply(); },
+  };
+  if (keys[e.key]) { e.preventDefault(); e.stopPropagation(); keys[e.key](); }
+});
+lb.dlg.addEventListener("close", () => lb.box.replaceChildren());
+addEventListener("resize", () => { if (lb.dlg.open) lbFit(false); });
+
+// Click an image or a diagram in the document to expand it. Links, Ctrl-clicks and selections keep their usual meaning.
+el.preview.addEventListener("click", (e) => {
+  if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+  const btn = e.target.closest(".zoom-btn");
+  const target = btn?.parentElement || e.target.closest(".md img, .mermaid-block:not(.mermaid-error)");
+  if (!target || (!btn && target.closest("a[href]"))) return;
+  if (!btn && String(getSelection()).trim()) return;
+  e.preventDefault();
+  openLightbox(target);
+});
 
 /** PDFs go to the bundled pdf.js viewer; HTML to a script-less sandboxed frame. */
 function showViewer(kind, path, bytes) {
@@ -1977,12 +2124,174 @@ document.addEventListener("mouseover", (e) => {
 });
 document.addEventListener("mousedown", () => { clearTimeout(tipTimer); el.tooltip.hidden = true; });
 
+// ---------- updates (tauri-plugin-updater; releases/latest/download/latest.json on GitHub) ----------
+// Never modal: a corner card says what is happening, a titlebar button keeps the progress when the card is hidden.
+// Windows can't replace a running app, so there the download finishes in the background and the installer runs on Restart.
+const RELEASES_URL = "https://github.com/MahirHamiAbrar/MarkdownViewer/releases/latest";
+const IS_WINDOWS = /Windows/.test(navigator.userAgent);
+const upd = {
+  phase: "idle", // idle | checking | none | available | downloading | installing | ready | error
+  update: null, version: "", progress: 0, total: 0, got: 0, error: "", supported: true, cardHidden: false,
+  card: $(".update-card"), btn: $(".update-btn"),
+};
+
+function renderUpdate() {
+  const { phase, version, progress } = upd;
+  const pct = `${Math.round(progress * 100)}%`;
+  const busy = phase === "downloading" || phase === "installing";
+  const text = {
+    idle: ["", "Not checked yet."],
+    checking: ["Checking for updates…", "Checking for updates…"],
+    none: ["", "You have the latest version."],
+    available: [`Version ${version} is available`, upd.supported ? `Version ${version} is available.` : `Version ${version} is available. Download it from the releases page.`],
+    downloading: [`Downloading version ${version}`, upd.total ? `Downloading version ${version}… ${pct}` : `Downloading version ${version}…`],
+    installing: [`Installing version ${version}`, `Installing version ${version}…`],
+    ready: [`Version ${version} is ready`, `Version ${version} is installed. Restart to apply it.`],
+    error: ["Couldn't update", `Couldn't update. ${upd.error}`],
+  }[phase];
+  const cardDesc = {
+    available: upd.supported ? "It downloads and installs in the background while you keep working." : "This copy was installed by a package. Download the new version to update.",
+    downloading: upd.total ? pct : "",
+    installing: "Almost done. Keep working.",
+    ready: "Restart to apply the update. You'll be asked about unsaved changes first.",
+    error: upd.error,
+  }[phase] || "";
+  const acts = {
+    available: upd.supported ? [["Update", "update-install", true], ["Later", "update-hide"]] : [["Download", "update-download", true], ["Later", "update-hide"]],
+    ready: [["Restart", "update-restart", true], ["Later", "update-hide"]],
+    error: [["Retry", "update-install", true]],
+  }[phase] || [];
+
+  // Corner card
+  const showCard = !upd.cardHidden && ["available", "downloading", "installing", "ready", "error"].includes(phase);
+  upd.card.hidden = !showCard;
+  upd.card.classList.toggle("error", phase === "error");
+  $(".update-title", upd.card).textContent = text[0];
+  $(".update-desc", upd.card).textContent = cardDesc;
+  $(".update-acts", upd.card).innerHTML = acts.map(([label, action, primary]) =>
+    `<button class="btn ${primary ? "btn-primary" : "btn-ghost"}" data-action="${action}">${label}</button>`).join("");
+  // Progress bars: card and settings
+  for (const bar of $$(".update-progress")) {
+    bar.hidden = !busy;
+    bar.classList.toggle("indeterminate", phase === "installing" || (phase === "downloading" && !upd.total));
+    bar.style.setProperty("--p", pct);
+  }
+  if (showCard) el.root.style.setProperty("--update-h", `${upd.card.offsetHeight}px`);
+  // Titlebar button: progress while the card is hidden, and a way back to Restart
+  upd.btn.hidden = !(upd.cardHidden && (busy || phase === "ready" || phase === "available"));
+  upd.btn.classList.toggle("ready", phase !== "downloading");
+  upd.btn.style.setProperty("--p", pct);
+  upd.btn.dataset.tip = phase === "downloading" && upd.total ? `Downloading update… ${pct}` : text[0];
+  // Settings row
+  $(".update-status").textContent = text[1];
+  $('[data-action="update-check"]', el.settingsDlg).disabled = phase === "checking" || busy;
+  const install = $(".update-row-acts .btn-primary", el.settingsDlg);
+  install.disabled = busy || phase === "checking";
+  install.textContent = phase === "ready" ? "Restart to update" : upd.supported ? "Install latest update" : "Download latest version";
+  install.dataset.action = phase === "ready" ? "update-restart" : upd.supported ? "update-install" : "update-download";
+}
+
+/** Looks for a newer version. `manual`: the user asked, so say so when there is none. */
+async function checkForUpdate({ manual = false } = {}) {
+  if (["checking", "downloading", "installing"].includes(upd.phase)) return;
+  if (upd.phase === "ready") return manual && showUpdateCard();
+  upd.phase = "checking";
+  renderUpdate();
+  try {
+    const found = await window.__TAURI__.updater.check({ timeout: 30000 });
+    if (!found) {
+      upd.phase = "none";
+      if (manual) toast("You have the latest version.");
+      return renderUpdate();
+    }
+    Object.assign(upd, { update: found, version: found.version, phase: "available", cardHidden: false });
+    if (!manual && state.settings.updateAuto !== false && upd.supported) return installUpdate({ quiet: true });
+    renderUpdate();
+  } catch (err) {
+    // A failed background check (offline, say) is not worth a card; a manual one is.
+    Object.assign(upd, { phase: manual ? "error" : "idle", error: friendlyUpdateError(err), cardHidden: !manual });
+    renderUpdate();
+  }
+}
+
+function friendlyUpdateError(err) {
+  const msg = String(err?.message || err || "");
+  if (/signature/i.test(msg)) return "The download didn't pass its signature check, so it wasn't installed.";
+  if (/network|connect|dns|timed? ?out|request|offline/i.test(msg)) return "Check your network and try again.";
+  return msg || "Something went wrong.";
+}
+
+/** Downloads (and, except on Windows, installs) the update in the background. `quiet`: started automatically. */
+async function installUpdate({ quiet = false } = {}) {
+  if (!upd.supported) return actions["update-download"]();
+  if (["downloading", "installing", "ready", "checking"].includes(upd.phase)) return;
+  if (!upd.update || upd.phase === "error") {
+    upd.phase = "idle";
+    await checkForUpdate({ manual: true });
+    if (upd.phase !== "available") return;
+  }
+  Object.assign(upd, { phase: "downloading", progress: 0, total: 0, got: 0, cardHidden: quiet });
+  renderUpdate();
+  const onEvent = (e) => {
+    if (e.event === "Started") upd.total = e.data.contentLength || 0;
+    else if (e.event === "Progress") {
+      upd.got += e.data.chunkLength;
+      if (upd.total) upd.progress = Math.min(1, upd.got / upd.total);
+    } else if (e.event === "Finished") {
+      upd.progress = 1;
+      if (!IS_WINDOWS) upd.phase = "installing";
+    }
+    renderUpdateSoon();
+  };
+  try {
+    if (IS_WINDOWS) await upd.update.download(onEvent);
+    else await upd.update.downloadAndInstall(onEvent);
+    Object.assign(upd, { phase: "ready", cardHidden: false });
+  } catch (err) {
+    Object.assign(upd, { phase: "error", error: friendlyUpdateError(err), cardHidden: false });
+  }
+  renderUpdate();
+}
+let updateFrame = 0;
+const renderUpdateSoon = () => { updateFrame ||= requestAnimationFrame(() => { updateFrame = 0; renderUpdate(); }); };
+
+function showUpdateCard() { upd.cardHidden = false; renderUpdate(); }
+
+async function restartForUpdate() {
+  // Unsaved work: same questions as closing the window. Drafts cover the other windows.
+  for (const tab of state.tabs.filter(tabDirty)) {
+    if (!(await activateTab(tab.id)) || !(await settleUnsaved())) return;
+  }
+  try {
+    if (IS_WINDOWS) await upd.update.install(); // runs the installer, which quits and relaunches the app
+    else await window.__TAURI__.process.relaunch();
+  } catch (err) {
+    Object.assign(upd, { phase: "error", error: friendlyUpdateError(err), cardHidden: false });
+    renderUpdate();
+  }
+}
+
+invoke("update_supported").then((ok) => { upd.supported = ok; renderUpdate(); }, () => {});
+invoke("app_version").then((v) => { $(".update-cur").textContent = v; }, () => {});
+renderUpdate();
+if (IS_MAIN) { // one window checks for all of them
+  const autoCheck = () => { if (state.settings.updateCheck !== false) checkForUpdate(); };
+  setTimeout(autoCheck, 8000); // after startup work settles
+  setInterval(autoCheck, 6 * 60 * 60 * 1000);
+}
+
 // ---------- actions ----------
 const actions = {
   "toggle-sidebar": toggleSidebar,
   "open-file": pickFile,
   "open-folder": pickFolder,
   "refresh-folder": () => loadTree(),
+  "update-check": () => checkForUpdate({ manual: true }),
+  "update-install": () => installUpdate(),
+  "update-restart": restartForUpdate,
+  "update-download": () => opener.openUrl(RELEASES_URL).catch(() => toast("Couldn't open the releases page.", "error")),
+  "update-hide": () => { upd.cardHidden = true; renderUpdate(); },
+  "update-show": showUpdateCard,
   "settings-reset": () => {
     state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiProvider: state.settings.aiProvider, aiModel: state.settings.aiModel, aiMemory: state.settings.aiMemory, aiEdits: state.settings.aiEdits };
     applySettings();
@@ -2093,7 +2402,7 @@ async function standaloneHtml() {
     css += rules + "\n";
   }
   const body = el.preview.cloneNode(true);
-  for (const n of $$(".code-tools", body)) n.remove();
+  for (const n of $$(".code-tools, .zoom-btn", body)) n.remove();
   for (const box of $$('input[type="checkbox"]', body)) box.disabled = true;
   for (const img of $$("img[data-local]", body)) { // local images travel inside the page
     const type = IMAGE_TYPES[img.dataset.local.split(".").pop().toLowerCase()];

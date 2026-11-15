@@ -54,6 +54,10 @@
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/><path d="M10.5 11v5M13.5 11v5"/></symbol>
       <symbol id="i-loader" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/></symbol>
       <symbol id="i-highlight" viewBox="0 0 24 24"><path d="m4 20 1.1-3.8L14.7 6.6a2.1 2.1 0 0 1 3 3L8.1 19.2z"/><path d="m13.2 7.9 2.9 2.9"/><path d="M4 22h16"/></symbol>
+      <symbol id="i-expand" viewBox="0 0 24 24"><path d="M14 4h6v6M10 20H4v-6M20 4l-6.5 6.5M4 20l6.5-6.5"/></symbol>
+      <symbol id="i-zoom-in" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2M11 8v6M8 11h6"/></symbol>
+      <symbol id="i-zoom-out" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2M8 11h6"/></symbol>
+      <symbol id="i-fit" viewBox="0 0 24 24"><path d="M4 9V6.5A2.5 2.5 0 0 1 6.5 4H9M15 4h2.5A2.5 2.5 0 0 1 20 6.5V9M20 15v2.5a2.5 2.5 0 0 1-2.5 2.5H15M9 20H6.5A2.5 2.5 0 0 1 4 17.5V15"/></symbol>
       <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6.5" cy="6" r="2.2"/><circle cx="17.5" cy="6.5" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><path d="M6.5 8.2v7.6"/><path d="M8.7 5.7c3.6-.6 6.6-.4 6.6 3.3v4.6"/></symbol>
     </defs>
   </svg>
@@ -79,6 +83,7 @@
         <button class="icon-btn" data-action="html" data-tip="Export as HTML" data-key="Ctrl Shift E" aria-label="Export as HTML"><svg><use href="#i-html"/></svg></button>
       </div>
       <div class="tb-group">
+        <button class="icon-btn update-btn" data-action="update-show" data-tip="Update" aria-label="Show update progress" hidden><svg><use href="#i-drop"/></svg><span class="update-btn-bar"></span></button>
         <button class="icon-btn" data-action="toggle-ai" data-tip="Big Brain (AI)" data-key="Ctrl Shift M" aria-label="Toggle Big Brain AI" aria-pressed="false"><svg><use href="#i-sparkle"/></svg></button>
         <button class="icon-btn" data-action="settings" data-tip="Settings" data-key="Ctrl ," aria-label="Settings"><svg><use href="#i-settings"/></svg></button>
         <span class="tb-sep"></span>
@@ -247,6 +252,17 @@
   </div>
 
   <div class="toasts" role="status"></div>
+  <!-- Update notice: bottom-right, never modal. Filled by the updater in main.js. -->
+  <div class="update-card popover" role="status" aria-live="polite" hidden>
+    <span class="icon-tile"><svg><use href="#i-drop"/></svg></span>
+    <div class="update-body">
+      <div class="update-title"></div>
+      <div class="update-desc"></div>
+      <div class="update-progress" hidden><div class="update-progress-fill"></div></div>
+      <div class="update-acts"></div>
+    </div>
+    <button class="icon-btn update-close" data-action="update-hide" aria-label="Hide"><svg><use href="#i-x"/></svg></button>
+  </div>
   <div class="tooltip" role="tooltip" hidden></div>
   <div class="ctx-menu popover" role="menu" hidden></div>
   <div class="ai-selchip popover" role="toolbar" aria-label="Selection actions" hidden>
@@ -257,6 +273,20 @@
   </div>
   <div class="ai-menu popover" role="menu" hidden></div>
   <div class="hl-menu popover" role="menu" hidden></div>
+
+  <!-- Expanded image / diagram: drag to pan, scroll or pinch to zoom. -->
+  <dialog class="dlg-zoom" aria-label="Expanded view" tabindex="-1">
+    <div class="zoom-stage"><div class="zoom-content"></div></div>
+    <div class="zoom-bar popover" role="toolbar" aria-label="Zoom">
+      <button class="icon-btn" data-zoom="out" data-tip="Zoom out" data-key="−" aria-label="Zoom out"><svg><use href="#i-zoom-out"/></svg></button>
+      <button class="zoom-level" data-zoom="actual" data-tip="Actual size" data-key="1">100%</button>
+      <button class="icon-btn" data-zoom="in" data-tip="Zoom in" data-key="+" aria-label="Zoom in"><svg><use href="#i-zoom-in"/></svg></button>
+      <span class="zoom-sep"></span>
+      <button class="icon-btn" data-zoom="fit" data-tip="Fit to window" data-key="0" aria-label="Fit to window"><svg><use href="#i-fit"/></svg></button>
+      <button class="icon-btn" data-zoom="close" data-tip="Close" data-key="Esc" aria-label="Close"><svg><use href="#i-x"/></svg></button>
+    </div>
+    <div class="zoom-hint">Scroll to zoom · drag to move · double-click to zoom in</div>
+  </dialog>
 
   <dialog class="dialog dlg-settings" aria-labelledby="settings-title">
     <div class="dialog-head">
@@ -291,6 +321,10 @@
       <div class="row">
         <div><div class="row-label">Editor font</div><div class="row-desc">Markdown source in the editor.</div></div>
         <label class="search-field font-field"><input class="font-input" data-font="fontEditor" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Editor font" /></label>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Turn on Blur Effect</div><div class="row-desc">Frosted, see-through popups and menus. Off by default on Linux, where most setups can't draw the blur.</div></div>
+        <button class="switch" role="switch" data-setting-toggle="blur" aria-checked="true" aria-label="Turn on blur effect"></button>
       </div>
     </div>
     <div class="card">
@@ -395,6 +429,25 @@
         <span class="ai-model-id ai-search-providers">—</span>
       </div>
       <p class="ai-privacy">When you ask, Big Brain sends your message, the open document (for a large one, its outline and the parts Big Brain reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. Big Brain can also search and read the other text files of your workspace (open folders and files, including files you @mention), and pages of its PDFs as text or images. Chats and memory are stored only on this device. Web searches go through your configured proxy or Tor by default; queries are sent only to the chosen search engine.</p>
+    </div>
+    <div class="card">
+      <div class="card-heading">Updates</div>
+      <div class="row">
+        <div><div class="row-label">Check for updates automatically</div><div class="row-desc">Look for a new version at startup and every few hours.</div></div>
+        <button class="switch" role="switch" data-setting-toggle="updateCheck" aria-checked="true" aria-label="Check for updates automatically"></button>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Install updates automatically</div><div class="row-desc">Download and install new versions in the background. You choose when to restart.</div></div>
+        <button class="switch" role="switch" data-setting-toggle="updateAuto" aria-checked="true" aria-label="Install updates automatically"></button>
+      </div>
+      <div class="row update-row">
+        <div class="update-row-text"><div class="row-label">Version <span class="update-cur">—</span></div><div class="row-desc update-status">Not checked yet.</div>
+          <div class="update-progress" hidden><div class="update-progress-fill"></div></div></div>
+        <div class="update-row-acts">
+          <button class="btn btn-outline" data-action="update-check">Check for updates</button>
+          <button class="btn btn-primary" data-action="update-install">Install latest update</button>
+        </div>
+      </div>
     </div>
     <div class="settings-foot"><button class="btn btn-outline" data-action="settings-reset">Reset to defaults</button></div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
