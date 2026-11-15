@@ -10,11 +10,12 @@ use comrak::plugins::syntect::{SyntectAdapter, SyntectAdapterBuilder};
 use comrak::options::Plugins;
 use comrak::{markdown_to_html_with_plugins, Options};
 use serde::Serialize;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 mod ai;
 mod anthropic;
 mod chats;
+mod cli;
 mod fsutil;
 mod providers;
 
@@ -168,10 +169,43 @@ fn drafts_list(app: tauri::AppHandle) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Open requests waiting for their window's frontend to boot, by window label.
+#[derive(Default)]
+struct PendingOpens(Mutex<HashMap<String, cli::OpenRequest>>);
+
+/// Label of the window focused last: where a file opened from the terminal goes.
+struct LastFocused(Mutex<String>);
+
+/// What this window was launched to open, handed over once.
 #[tauri::command]
-fn initial_file() -> Option<String> {
-    let arg = std::env::args().nth(1)?;
-    fs::canonicalize(arg).ok().map(|p| p.to_string_lossy().into_owned())
+fn initial_open(window: tauri::WebviewWindow, pending: tauri::State<PendingOpens>) -> Option<cli::OpenRequest> {
+    pending.0.lock().unwrap().remove(window.label())
+}
+
+/// Sorts dropped paths into files and folders.
+#[tauri::command(async)]
+fn classify_paths(paths: Vec<String>) -> cli::OpenRequest {
+    // "--" first: a dropped path is never an option.
+    cli::parse(std::iter::once("--".to_string()).chain(paths), Path::new("/")).unwrap_or_default()
+}
+
+/// Routes a launch to a window: its own for folders and `-n`, otherwise the one used last.
+fn dispatch(app: &tauri::AppHandle, req: cli::OpenRequest) {
+    let windows = app.webview_windows();
+    let last = app.state::<LastFocused>().0.lock().unwrap().clone();
+    let target = if req.wants_window() { None } else { windows.get(&last).or_else(|| windows.values().next()) };
+    match target {
+        Some(window) => {
+            let _ = app.emit_to(window.label(), "open-request", &req);
+            let _ = window.unminimize();
+            let _ = window.set_focus();
+        }
+        None => {
+            if let Err(err) = open_window(app, Some(req)) {
+                eprintln!("markdowneditor: {err}");
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -223,13 +257,15 @@ async fn export_pdf(webview: tauri::Webview, path: String) -> Result<bool, Strin
     webview.print().map(|()| false).map_err(|e| e.to_string())
 }
 
-/// Opens another blank window alongside the current one. `?fresh=1` stops the
-/// frontend from restoring the last file or the CLI-argument file in it.
-#[tauri::command]
-fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+/// Opens another window alongside the current ones, blank or showing `req`. `?fresh=1` stops
+/// the frontend from restoring the last session in it.
+fn open_window(app: &tauri::AppHandle, req: Option<cli::OpenRequest>) -> Result<(), String> {
     let windows = app.webview_windows();
     let label = (2..).map(|n| format!("main-{n}")).find(|l| !windows.contains_key(l)).unwrap();
-    tauri::WebviewWindowBuilder::new(&app, label, tauri::WebviewUrl::App("index.html?fresh=1".into()))
+    if let Some(req) = req {
+        app.state::<PendingOpens>().0.lock().unwrap().insert(label.clone(), req);
+    }
+    tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html?fresh=1".into()))
         .title("MarkdownEditor")
         .inner_size(1180., 780.)
         .min_inner_size(640., 420.)
@@ -239,6 +275,11 @@ fn new_window(app: tauri::AppHandle) -> Result<(), String> {
         .build()
         .map(|_| ())
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn new_window(app: tauri::AppHandle) -> Result<(), String> {
+    open_window(&app, None)
 }
 
 fn font_families(fc_list: &str) -> Vec<String> {
@@ -365,7 +406,37 @@ fn search_files(paths: Vec<String>, query: String) -> Vec<Hit> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        return println!("{}", cli::HELP);
+    }
+    if args.iter().any(|a| a == "-v" || a == "--version") {
+        return println!("markdowneditor {}", env!("CARGO_PKG_VERSION"));
+    }
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let request = cli::parse(args, &cwd).unwrap_or_else(|err| {
+        eprintln!("markdowneditor: {err}\n\n{}", cli::HELP);
+        std::process::exit(2);
+    });
+
+    let mut builder = tauri::Builder::default();
+    // ponytail: --wait runs as its own process and ends with its window, so the caller blocks on
+    // the whole window rather than one tab; signal tab-close back to a waiting launcher if needed.
+    if !request.wait {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+            // A later launch hands its arguments to this process and exits.
+            let req = cli::parse(args.into_iter().skip(1), Path::new(&cwd)).unwrap_or_default();
+            dispatch(app, req);
+        }));
+    }
+    builder
+        .manage(PendingOpens(Mutex::new(HashMap::from([("main".to_string(), request)]))))
+        .manage(LastFocused(Mutex::new("main".into())))
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(true) = event {
+                *window.state::<LastFocused>().0.lock().unwrap() = window.label().to_string();
+            }
+        })
         .setup(|app| {
             // Load syntect's syntaxes before the first document arrives.
             std::thread::spawn(|| render_markdown("```rust\nfn main() {}\n```".into()));
@@ -384,7 +455,8 @@ pub fn run() {
             render_markdown,
             read_file,
             write_file,
-            initial_file,
+            initial_open,
+            classify_paths,
             app_version,
             read_bytes,
             export_pdf,

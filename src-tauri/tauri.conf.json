@@ -34,6 +34,13 @@
     "active": true,
     "targets": "all",
     "category": "Productivity",
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/bin/mde": "mde"
+        }
+      }
+    },
     "shortDescription": "A calm Markdown viewer and editor",
     "icon": [
       "icons/32x32.png",

@@ -140,7 +140,8 @@ chmod +x MarkdownEditor_<version>_amd64.AppImage
 ./MarkdownEditor_<version>_amd64.AppImage
 ```
 
-Both come with a desktop entry and Markdown file associations. Windows and macOS have no
+Both come with a desktop entry and Markdown file associations. See
+[From the terminal](#from-the-terminal) for the `markdowneditor` command. Windows and macOS have no
 released binaries yet; see [docs/BUILDING.md](docs/BUILDING.md) to build your own.
 
 ### Verify your download
@@ -181,6 +182,21 @@ PREFIX=/usr/local sudo -E ./install.sh   # system-wide
 System libraries (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, …) are installed automatically on
 apt-based distros. See the [Tauri Linux prerequisites](https://v2.tauri.app/start/prerequisites/#linux)
 for other distributions.
+
+## From the terminal
+
+```sh
+markdowneditor notes.md        # open a file (in the window used last, if the app is running)
+markdowneditor notes.md:42     # ... at line 42
+markdowneditor docs/           # open a folder in a new window
+markdowneditor -n notes.md     # force a new window
+markdowneditor -a docs/        # add the folder to the window used last
+EDITOR="markdowneditor --wait" git commit   # block until the window closes
+```
+
+`mde` is a short alias, installed by the `.deb` and by `install.sh`. A path that does not exist
+yet opens as a new document and is created on first save. `markdowneditor --help` lists every
+option.
 
 ## Development
 

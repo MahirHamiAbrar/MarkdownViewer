@@ -548,6 +548,52 @@ async function newFile() {
   renderPreview();
 }
 
+/** Starts a document that is written to `p` on first save (a path named on the command line). */
+async function newFileAt(p) {
+  if (!(await settleUnsaved())) return false;
+  Object.assign(state, { path: p, untitled: false, saved: "", text: "", view: null });
+  renderSrc = null;
+  el.editor.value = "";
+  resetHistory();
+  showDoc();
+  setMode("edit");
+  renderPreview();
+  return true;
+}
+
+function gotoLine(line) {
+  let offset = 0;
+  for (let n = 1; n < line; n++) {
+    const next = state.text.indexOf("\n", offset);
+    if (next === -1) break;
+    offset = next + 1;
+  }
+  if (state.mode === "read") return setScrollRatio(el.previewPane, offset / Math.max(1, state.text.length)); // the preview has no line map
+  el.editor.focus({ preventScroll: true });
+  el.editor.setSelectionRange(offset, offset);
+  scrollEditorTo(offset);
+  updatePos();
+}
+
+/** Opens what a launch, a later `markdowneditor <path>`, or a drop asked for. Resolves true once a document is shown. */
+async function handleOpenRequest(req) {
+  for (const dir of req.folders) await setFolder(dir);
+  // ponytail: one document per window, so the first openable file wins; open them all once tabs exist.
+  const file = req.files.find((f) => canOpen(f.path));
+  if (!file) {
+    if (req.files.length) toast("Only Markdown, PDF and HTML files can be opened.", "error");
+    return false;
+  }
+  if (file.new) {
+    if (MD_RE.test(file.path)) return newFileAt(file.path);
+    toast(`Couldn't open “${baseName(file.path)}”. It does not exist.`, "error");
+    return false;
+  }
+  if (!(await openFile(file.path))) return false;
+  if (file.line && !state.view) gotoLine(file.line);
+  return true;
+}
+
 async function newWindow() {
   try {
     await invoke("new_window");
@@ -3628,12 +3674,11 @@ webview.onDragDropEvent((e) => {
   const t = e.payload.type;
   if (t === "enter" || t === "over") el.drop.hidden = false;
   else el.drop.hidden = true;
-  if (t === "drop") {
-    const p = e.payload.paths.find(canOpen);
-    if (p) openFile(p);
-    else if (e.payload.paths.length) toast("Only Markdown, PDF and HTML files can be opened.", "error");
-  }
+  if (t === "drop" && e.payload.paths.length) invoke("classify_paths", { paths: e.payload.paths }).then(handleOpenRequest);
 });
+
+// A later `markdowneditor <path>` in a terminal lands here instead of starting a second app.
+appWindow.listen("open-request", (e) => handleOpenRequest(e.payload));
 
 // Other tools (git, another editor, an AI agent) change files while this window sits in the background:
 // on return, show what is on disk. Unsaved edits are never replaced, only flagged.
@@ -3678,9 +3723,9 @@ addEventListener("focus", () => {
   const w = store.get("sidebarW", null);
   if (w) el.root.style.setProperty("--sidebar-w", w);
   if (!narrow.matches && store.get("sidebarClosed", false)) el.win.dataset.sidebar = "closed";
-  // A window opened via New Window (?fresh=1) starts blank: no CLI-arg file, no last-file restore.
+  // A window opened later (?fresh=1) restores no session: it shows what it was opened for, or starts blank.
   const fresh = new URLSearchParams(location.search).has("fresh");
-  const initialReq = fresh ? Promise.resolve(null) : invoke("initial_file"); // start the document fetch before anything else
+  const initialReq = invoke("initial_open"); // what the command line asked for; fetched before anything else
   renderSidebar();
   syncMaximized();
   const aiW = store.get("aiW", null);
@@ -3697,11 +3742,15 @@ addEventListener("focus", () => {
     renderWelcome();
     if (state.path) updateChrome();
   }, () => { /* fall back to full paths */ });
-  const initial = fresh ? null : (await initialReq) || (state.settings.startup === "last" ? store.get("lastFile", null) : null);
-  // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
-  if (!fresh && (await restoreDraft())) return;
-  if (!initial || !(await openFile(initial, { quiet: true }))) {
-    renderWelcome();
-    el.welcome.hidden = false;
+  const showWelcome = () => { renderWelcome(); el.welcome.hidden = false; };
+  const req = await initialReq;
+  if (req?.files.length || req?.folders.length) { // an explicit request wins over the last session
+    if (!(await handleOpenRequest(req))) showWelcome();
+    return;
   }
+  if (fresh) return showWelcome();
+  if (await restoreDraft()) return;
+  // A missing last file is not worth an error on startup; the welcome screen stays hidden until known.
+  const last = state.settings.startup === "last" ? store.get("lastFile", null) : null;
+  if (!last || !(await openFile(last, { quiet: true }))) showWelcome();
 })();

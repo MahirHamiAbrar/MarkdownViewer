@@ -29,7 +29,7 @@ refresh_caches() {
 }
 
 remove_files() { # $1 = app id, $2 = binary
-  rm -f "$2" "$APPS/$1.desktop" "$ICONS/scalable/apps/$1.svg"
+  rm -f "$2" "$(dirname "$2")/mde" "$APPS/$1.desktop" "$ICONS/scalable/apps/$1.svg"
   for size in 32x32 128x128 256x256; do rm -f "$ICONS/$size/apps/$1.png"; done
   local mimeapps="${XDG_CONFIG_HOME:-$HOME/.config}/mimeapps.list"
   [[ -f "$mimeapps" ]] && sed -i "/=$1\.desktop;\?$/d; s/$1\.desktop;//g" "$mimeapps"
@@ -77,6 +77,7 @@ install_files() {
   say "Installing into $PREFIX"
   remove_files "$OLD_APP_ID" "$PREFIX/bin/mdviewer" # an install from before the rename
   install -Dm755 "$ROOT/src-tauri/target/release/markdowneditor" "$BIN"
+  ln -sf markdowneditor "$PREFIX/bin/mde" # short name for the terminal: mde notes/
   install -Dm644 "$ROOT/src-tauri/icons/32x32.png" "$ICONS/32x32/apps/$APP_ID.png"
   install -Dm644 "$ROOT/src-tauri/icons/128x128.png" "$ICONS/128x128/apps/$APP_ID.png"
   install -Dm644 "$ROOT/src-tauri/icons/128x128@2x.png" "$ICONS/256x256/apps/$APP_ID.png"
@@ -88,7 +89,7 @@ Type=Application
 Name=MarkdownEditor
 GenericName=Markdown Editor
 Comment=A calm Markdown viewer and editor
-Exec=$BIN %f
+Exec=$BIN %F
 Icon=$APP_ID
 StartupWMClass=markdowneditor
 Terminal=false
@@ -108,7 +109,7 @@ EOF
 case "${1:-}" in
   -h|--help) usage ;;
   --uninstall) uninstall ;;
-  --reinstall) build; uninstall; install_files; say "Reinstalled. Open any .md file, or run: $BIN" ;;
-  "") build; install_files; say "Installed. Open any .md file, or run: $BIN" ;;
+  --reinstall) build; uninstall; install_files; say "Reinstalled. Open any .md file, or run: mde <file or folder>" ;;
+  "") build; install_files; say "Installed. Open any .md file, or run: mde <file or folder>" ;;
   *) usage >&2; die "unknown option: $1" ;;
 esac
