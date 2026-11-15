@@ -35,6 +35,7 @@ built with Tauri.
 - Right-side assistant that always sees the open document, including unsaved edits
 - Select any text to reveal **Ask Mark**; the selection is attached alongside the full file
 - Streaming Markdown answers with an expandable **Thinking** disclosure and an **Actions** trace
+- Private web search through Google, Bing, DuckDuckGo, Mojeek or SearXNG, with retries, proxy/Tor routing and provider fallback
 - Per-message token usage, plus chat totals and cost when the gateway reports it
 - Chats are saved under `~/.markdown-viewer-app/chats`, named by the model, and can be renamed or deleted
 
@@ -51,6 +52,46 @@ ask Mark a question.
 Chats persist as JSON at `~/.markdown-viewer-app/chats/<date>/<id>.json`, including messages,
 reasoning, actions, and token/cost usage. Nothing is sent anywhere else, and stored reasoning is
 never replayed to the model.
+
+### Private web search
+
+Mark can call a `web_search` tool when an answer needs current information. Toggle it from the
+model menu in Mark's header. Searches are **proxy-only by default**: without an explicit proxy,
+Mark tries Tor at `socks5h://127.0.0.1:9050`; if Tor is not running, search fails instead of
+falling back to your real IP. Direct search is opt-in from **Settings → Mark** and is clearly
+marked as non-private.
+
+Providers are tried in order, with retries and proxy/user-agent rotation. CAPTCHA, consent and
+JS-challenge pages are detected and skipped. Search queries and snippets are sent to
+Command Code as part of the model request; the search engine only sees the proxy/Tor route.
+
+Search settings live in `~/.markdown-viewer-app/config.json`:
+
+```json
+{
+  "search": {
+    "enabled": true,
+    "providers": ["google", "bing", "duckduckgo", "mojeek", "searx"],
+    "searxUrl": "http://127.0.0.1:8080",
+    "proxy": "socks5h://127.0.0.1:9050",
+    "proxies": [],
+    "allowDirect": false,
+    "useTor": true,
+    "retries": 1,
+    "maxResults": 5,
+    "timeoutMs": 8000,
+    "totalTimeoutMs": 30000
+  }
+}
+```
+
+- `proxy` / `proxies` — HTTP(S) or SOCKS proxies; multiple proxies rotate between retries.
+  Prefer `socks5h://` so DNS is resolved by the proxy/Tor, not locally.
+- `allowDirect` — when no proxy is configured, use a direct connection (reveals your IP).
+- `useTor` — fall back to `socks5h://127.0.0.1:9050` when no proxy is configured and direct is off.
+- `providers` — any order of `google`, `bing`, `duckduckgo`, `mojeek`, `searx`.
+  `searx` requires `searxUrl`; a self-hosted instance is the most reliable private option.
+- `retries` — extra attempts per provider (capped at 3); each retry rotates the proxy and user agent.
 
 ## Download & install (Linux)
 
@@ -116,6 +157,7 @@ publishes them on the [Releases page](../../releases).
 - `src-tauri/` — Rust backend (Tauri 2): Markdown rendering via
   [comrak](https://github.com/kivikakk/comrak), highlighting via syntect (two-face syntax set),
   HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the Command Code
-  gateway proxy (streaming SSE, reasoning, usage/cost), chat storage, file tree, search, font
-  listing, and PDF printing commands
+  gateway proxy (streaming SSE, reasoning, tool calling, usage/cost), private web search
+  (Google/Bing/DuckDuckGo/Mojeek/SearXNG through proxy/Tor with retries), chat storage, file tree,
+  search, font listing, and PDF printing commands
 - `install.sh` — build + Linux desktop integration (desktop file, icons, MIME defaults)

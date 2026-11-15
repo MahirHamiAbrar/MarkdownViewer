@@ -43,6 +43,7 @@ pub struct AiStatus {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AiAction {
+    pub kind: String,
     pub id: String,
     pub name: String,
     pub detail: String,
@@ -57,6 +58,20 @@ pub struct AiUsage {
     pub reasoning: u64,
     /// Cost in USD, only when the gateway reports one.
     pub cost: Option<f64>,
+}
+
+impl AiUsage {
+    fn merge(&mut self, other: &AiUsage) {
+        self.input += other.input;
+        self.output += other.output;
+        self.reasoning += other.reasoning;
+        self.cost = match (self.cost, other.cost) {
+            (Some(left), Some(right)) => Some(left + right),
+            (Some(left), None) => Some(left),
+            (None, Some(right)) => Some(right),
+            (None, None) => None,
+        };
+    }
 }
 
 #[derive(Serialize, Clone, Default)]
@@ -84,7 +99,13 @@ pub enum AiEvent {
     Status { phase: String },
     ReasoningDelta { text: String },
     Delta { text: String },
-    Action { id: String, name: String, detail: String, status: String },
+    Action {
+        kind: String,
+        id: String,
+        name: String,
+        detail: String,
+        status: String,
+    },
     Done {
         input_tokens: u64,
         output_tokens: u64,
@@ -225,6 +246,7 @@ pub async fn ai_chat(
     model: String,
     effort: String,
     messages: Vec<Value>,
+    web_search: bool,
     on_event: Channel<AiEvent>,
 ) -> Result<AiReply, String> {
     if model != MODEL {
@@ -241,23 +263,157 @@ pub async fn ai_chat(
     }
 
     let (key, _) = resolve_key(&app)?;
+    let search_config = crate::web_search::load_config(&app);
+    let tools = if web_search && search_config.ready() {
+        Some(vec![crate::web_search::tool_definition()])
+    } else {
+        None
+    };
+
     let cancel = Arc::new(AtomicBool::new(false));
     state.cancels.lock().unwrap().insert(request_id.clone(), cancel.clone());
-    let result = stream_chat(&state.client, &key, &model, &effort, &messages, &cancel, &on_event).await;
+    let result = run_agent(
+        &state.client, &key, &model, &effort, messages, tools, &search_config, &cancel, &on_event,
+    )
+    .await;
     state.cancels.lock().unwrap().remove(&request_id);
     result
 }
 
+const MAX_TOOL_ROUNDS: usize = 3;
+const MAX_SEARCHES: usize = 3;
+
+#[allow(clippy::too_many_arguments)]
+async fn run_agent(
+    client: &reqwest::Client,
+    key: &str,
+    model: &str,
+    effort: &str,
+    messages: Vec<Value>,
+    tools: Option<Vec<Value>>,
+    search_config: &crate::web_search::SearchConfig,
+    cancel: &AtomicBool,
+    on_event: &Channel<AiEvent>,
+) -> Result<AiReply, String> {
+    let started = Instant::now();
+    let mut conversation = messages;
+    let mut reply = AiReply::default();
+    let mut first_token_ms = 0u64;
+    let mut searches = 0usize;
+
+    for round in 0..=MAX_TOOL_ROUNDS {
+        if cancel.load(Ordering::Relaxed) {
+            reply.stopped = true;
+            break;
+        }
+        let turn = stream_chat(
+            client, key, model, effort, &conversation, tools.as_deref(), cancel, on_event, started, &mut first_token_ms,
+        )
+        .await?;
+        append_block(&mut reply.content, &turn.content);
+        append_reasoning(&mut reply.reasoning, &turn.reasoning);
+        reply.usage.merge(&turn.usage);
+        if turn.stopped {
+            reply.stopped = true;
+        }
+        if turn.calls.is_empty() || reply.stopped || round == MAX_TOOL_ROUNDS {
+            break;
+        }
+
+        let calls: Vec<Value> = turn
+            .calls
+            .iter()
+            .map(|call| {
+                json!({
+                    "id": call.id,
+                    "type": "function",
+                    "function": { "name": call.name, "arguments": call.arguments }
+                })
+            })
+            .collect();
+        conversation.push(json!({
+            "role": "assistant",
+            "content": if turn.content.is_empty() { Value::Null } else { Value::String(turn.content.clone()) },
+            "tool_calls": calls
+        }));
+
+        for call in &turn.calls {
+            if cancel.load(Ordering::Relaxed) {
+                reply.stopped = true;
+                break;
+            }
+            let (content, action) = execute_web_search(search_config, call, &mut searches, cancel, on_event).await;
+            conversation.push(json!({
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": content
+            }));
+            if let Some(action) = action {
+                reply.actions.push(action);
+            }
+        }
+        if reply.stopped {
+            break;
+        }
+    }
+
+    reply.timing = AiTiming {
+        first_token_ms,
+        duration_ms: started.elapsed().as_millis() as u64,
+    };
+    let _ = on_event.send(AiEvent::Done {
+        input_tokens: reply.usage.input,
+        output_tokens: reply.usage.output,
+        reasoning_tokens: reply.usage.reasoning,
+        cost: reply.usage.cost,
+        first_token_ms: reply.timing.first_token_ms,
+        duration_ms: reply.timing.duration_ms,
+    });
+    Ok(reply)
+}
+
+fn append_block(target: &mut String, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if !target.is_empty() {
+        target.push_str("\n\n");
+    }
+    target.push_str(text);
+}
+
+fn append_reasoning(target: &mut String, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    if !target.is_empty() {
+        push_capped(target, "\n\n", MAX_REASONING_CHARS);
+    }
+    push_capped(target, text, MAX_REASONING_CHARS);
+}
+
+struct TurnOutcome {
+    content: String,
+    reasoning: String,
+    usage: AiUsage,
+    stopped: bool,
+    calls: Vec<ToolCall>,
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn stream_chat(
     client: &reqwest::Client,
     key: &str,
     model: &str,
     effort: &str,
     messages: &[Value],
+    tools: Option<&[Value]>,
     cancel: &AtomicBool,
     on_event: &Channel<AiEvent>,
-) -> Result<AiReply, String> {
-    let body = json!({
+    run_started: Instant,
+    first_token_ms: &mut u64,
+) -> Result<TurnOutcome, String> {
+    let mut body = json!({
         "model": model,
         "messages": messages,
         "stream": true,
@@ -265,8 +421,11 @@ async fn stream_chat(
         "max_tokens": 8192,
         "reasoning_effort": effort,
     });
+    if let Some(tools) = tools {
+        body["tools"] = Value::Array(tools.to_vec());
+        body["tool_choice"] = json!("auto");
+    }
 
-    let started = Instant::now();
     let response = client
         .post(API_URL)
         .bearer_auth(key)
@@ -287,97 +446,232 @@ async fn stream_chat(
         value.to_str().ok().and_then(parse_cost)
     });
 
-    let mut reply = AiReply::default();
+    let mut content = String::new();
+    let mut reasoning = String::new();
     let mut usage = AiUsage::default();
+    let mut stopped = false;
     let mut parser = SseParser::default();
-    let mut first_token_ms = 0u64;
     let mut phase = String::new();
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
-            reply.stopped = true;
+            stopped = true;
             break;
         }
         let chunk = chunk.map_err(|e| network_error(&e))?;
         for item in parser.feed(&chunk) {
-            apply_stream_item(item, &mut reply, &mut usage, &mut first_token_ms, &mut phase, started, header_cost, on_event);
+            apply_stream_item(
+                item,
+                &mut content,
+                &mut reasoning,
+                &mut usage,
+                first_token_ms,
+                &mut phase,
+                run_started,
+                header_cost,
+                on_event,
+            );
         }
     }
     // A stream may end right after [DONE] without a trailing newline.
     for item in parser.finish() {
-        apply_stream_item(item, &mut reply, &mut usage, &mut first_token_ms, &mut phase, started, header_cost, on_event);
+        apply_stream_item(
+            item,
+            &mut content,
+            &mut reasoning,
+            &mut usage,
+            first_token_ms,
+            &mut phase,
+            run_started,
+            header_cost,
+            on_event,
+        );
     }
 
     if usage.cost.is_none() {
         usage.cost = header_cost;
     }
-    reply.usage = usage.clone();
-    reply.timing = AiTiming {
-        first_token_ms,
-        duration_ms: started.elapsed().as_millis() as u64,
-    };
-    for action in &mut reply.actions {
-        action.status = "done".into();
-    }
-    let _ = on_event.send(AiEvent::Done {
-        input_tokens: usage.input,
-        output_tokens: usage.output,
-        reasoning_tokens: usage.reasoning,
-        cost: usage.cost,
-        first_token_ms: reply.timing.first_token_ms,
-        duration_ms: reply.timing.duration_ms,
-    });
-    Ok(reply)
+    let calls = parser.take_calls();
+    Ok(TurnOutcome { content, reasoning, usage, stopped, calls })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_stream_item(
     item: StreamItem,
-    reply: &mut AiReply,
+    content: &mut String,
+    reasoning: &mut String,
     usage: &mut AiUsage,
     first_token_ms: &mut u64,
     phase: &mut String,
-    started: Instant,
+    run_started: Instant,
     header_cost: Option<f64>,
     on_event: &Channel<AiEvent>,
 ) {
     match item {
         StreamItem::Reasoning(text) => {
             if *first_token_ms == 0 {
-                *first_token_ms = started.elapsed().as_millis() as u64;
+                *first_token_ms = run_started.elapsed().as_millis() as u64;
             }
             if phase.as_str() != "thinking" {
                 *phase = "thinking".into();
                 let _ = on_event.send(AiEvent::Status { phase: "thinking".into() });
             }
-            push_capped(&mut reply.reasoning, &text, MAX_REASONING_CHARS);
+            push_capped(reasoning, &text, MAX_REASONING_CHARS);
             let _ = on_event.send(AiEvent::ReasoningDelta { text });
         }
         StreamItem::Content(text) => {
             if *first_token_ms == 0 {
-                *first_token_ms = started.elapsed().as_millis() as u64;
+                *first_token_ms = run_started.elapsed().as_millis() as u64;
             }
             if phase.as_str() != "writing" {
                 *phase = "writing".into();
                 let _ = on_event.send(AiEvent::Status { phase: "writing".into() });
             }
-            reply.content.push_str(&text);
+            content.push_str(&text);
             let _ = on_event.send(AiEvent::Delta { text });
         }
-        StreamItem::Action { id, name, detail } => {
-            let action = AiAction { id: id.clone(), name: name.clone(), detail: detail.clone(), status: "running".into() };
-            if let Some(existing) = reply.actions.iter_mut().find(|action| action.id == id) {
-                *existing = action;
-            } else {
-                reply.actions.push(action);
-            }
-            let _ = on_event.send(AiEvent::Action { id, name, detail, status: "running".into() });
-        }
-        StreamItem::Usage { input, output, reasoning, cost } => {
-            *usage = AiUsage { input, output, reasoning, cost: cost.or(header_cost) };
+        // Tool call deltas are accumulated by the parser; a run row is emitted
+        // only when the call is actually executed.
+        StreamItem::Action { .. } => {}
+        StreamItem::Usage { input, output, reasoning: reasoning_tokens, cost } => {
+            *usage = AiUsage { input, output, reasoning: reasoning_tokens, cost: cost.or(header_cost) };
         }
         StreamItem::Done => {}
     }
+}
+
+async fn execute_web_search(
+    config: &crate::web_search::SearchConfig,
+    call: &ToolCall,
+    searches: &mut usize,
+    cancel: &AtomicBool,
+    on_event: &Channel<AiEvent>,
+) -> (String, Option<AiAction>) {
+    let id = call.id.clone();
+    if call.name != "web_search" {
+        let action = AiAction {
+            kind: "tool".into(),
+            id,
+            name: call.name.clone(),
+            detail: "Unknown tool".into(),
+            status: "error".into(),
+        };
+        send_action(on_event, &action);
+        return (format!("Unknown tool: {}", call.name), Some(action));
+    }
+
+    let query = serde_json::from_str::<Value>(&call.arguments)
+        .ok()
+        .and_then(|value| value.get("query").and_then(Value::as_str).map(str::to_owned))
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if query.is_empty() {
+        return failed_search(
+            on_event,
+            id,
+            "Missing query.",
+            "The web_search call is missing a query.".into(),
+        );
+    }
+    if *searches >= MAX_SEARCHES {
+        return failed_search(
+            on_event,
+            id,
+            "Search limit reached.",
+            "Web search limit reached for this response.".into(),
+        );
+    }
+    *searches += 1;
+
+    let safe_query = truncate_action_text(&query, 160);
+    let running = AiAction {
+        kind: "web".into(),
+        id: id.clone(),
+        name: "Web search".into(),
+        detail: format!("\"{safe_query}\""),
+        status: "running".into(),
+    };
+    send_action(on_event, &running);
+    let _ = on_event.send(AiEvent::Status { phase: "searching".into() });
+
+    let result = tokio::select! {
+        result = crate::web_search::search(config, &query) => result,
+        _ = async {
+            while !cancel.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+        } => Err("Search stopped.".to_string()),
+    };
+
+    match result {
+        Ok(response) => {
+            let action = AiAction {
+                kind: "web".into(),
+                id,
+                name: "Web search".into(),
+                detail: format!(
+                    "\"{safe_query}\" · {} result{} · {}{}",
+                    response.results.len(),
+                    if response.results.len() == 1 { "" } else { "s" },
+                    response.provider,
+                    if response.attempts > 1 {
+                        format!(" · {} attempts", response.attempts)
+                    } else {
+                        String::new()
+                    }
+                ),
+                status: "done".into(),
+            };
+            send_action(on_event, &action);
+            (crate::web_search::format_results(&query, &response), Some(action))
+        }
+        Err(error) => {
+            let error = truncate_action_text(&error, 300);
+            let action = AiAction {
+                kind: "web".into(),
+                id,
+                name: "Web search".into(),
+                detail: format!("\"{safe_query}\" · {error}"),
+                status: "error".into(),
+            };
+            send_action(on_event, &action);
+            (format!("Web search failed: {error}"), Some(action))
+        }
+    }
+}
+
+fn failed_search(on_event: &Channel<AiEvent>, id: String, short: &str, tool_content: String) -> (String, Option<AiAction>) {
+    let action = AiAction {
+        kind: "web".into(),
+        id,
+        name: "Web search".into(),
+        detail: short.to_string(),
+        status: "error".into(),
+    };
+    send_action(on_event, &action);
+    (tool_content, Some(action))
+}
+
+fn send_action(on_event: &Channel<AiEvent>, action: &AiAction) {
+    let _ = on_event.send(AiEvent::Action {
+        kind: action.kind.clone(),
+        id: action.id.clone(),
+        name: action.name.clone(),
+        detail: action.detail.clone(),
+        status: action.status.clone(),
+    });
+}
+
+fn truncate_action_text(text: &str, max: usize) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.chars().count() <= max {
+        return text;
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 #[tauri::command]
@@ -558,6 +852,21 @@ impl SseParser {
         out
     }
 
+    fn take_calls(&mut self) -> Vec<ToolCall> {
+        let mut calls: Vec<(usize, ToolCall)> = std::mem::take(&mut self.tools).into_iter().collect();
+        calls.sort_by_key(|(index, _)| *index);
+        calls
+            .into_iter()
+            .map(|(index, mut call)| {
+                if call.id.is_empty() {
+                    call.id = format!("call-{index}");
+                }
+                call
+            })
+            .filter(|call| !call.name.is_empty())
+            .collect()
+    }
+
     fn payload(&mut self, payload: &str, out: &mut Vec<StreamItem>) {
         if payload == "[DONE]" {
             out.push(StreamItem::Done);
@@ -611,11 +920,19 @@ impl SseParser {
             if let Some(id) = call.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()) {
                 entry.id = id.to_string();
             }
-            if let Some(name) = call.get("function").and_then(|f| f.get("name")).and_then(Value::as_str) {
-                entry.name.push_str(name);
+            if let Some(name) = call.get("function").and_then(|f| f.get("name")).and_then(Value::as_str).filter(|name| !name.is_empty()) {
+                if entry.name.is_empty() {
+                    entry.name = name.to_string();
+                } else if !entry.name.ends_with(name) {
+                    entry.name.push_str(name);
+                }
             }
-            if let Some(arguments) = call.get("function").and_then(|f| f.get("arguments")).and_then(Value::as_str) {
-                entry.arguments.push_str(arguments);
+            if let Some(arguments) = call.get("function").and_then(|f| f.get("arguments")) {
+                match arguments {
+                    Value::String(text) => entry.arguments.push_str(text),
+                    Value::Null => {}
+                    other => entry.arguments = other.to_string(),
+                }
             }
             if !entry.name.is_empty() {
                 let id = if entry.id.is_empty() { format!("tool-{index}") } else { entry.id.clone() };
@@ -668,6 +985,23 @@ data: [DONE]"#,
         });
         assert_eq!(usage, Some((10, 4, 2, Some(0.00042))));
         assert!(items.contains(&StreamItem::Done));
+
+        let calls = parser.take_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[0].arguments, "query more");
+    }
+
+    #[test]
+    fn merges_usage_across_turns() {
+        let mut total = AiUsage::default();
+        total.merge(&AiUsage { input: 10, output: 4, reasoning: 2, cost: Some(0.001) });
+        total.merge(&AiUsage { input: 3, output: 5, reasoning: 1, cost: None });
+        assert_eq!(total.input, 13);
+        assert_eq!(total.output, 9);
+        assert_eq!(total.reasoning, 3);
+        assert_eq!(total.cost, Some(0.001));
     }
 
     #[test]

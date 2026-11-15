@@ -42,12 +42,15 @@
       <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11.2v5M12 7.8v.4"/></symbol>
       <symbol id="i-sparkle" viewBox="0 0 24 24"><path d="M12 4.5 13.7 9.3 18.5 11l-4.8 1.7L12 17.5l-1.7-4.8L5.5 11l4.8-1.7z"/><path d="M18.5 3.5v3M17 5h3"/></symbol>
       <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M6.5 10.5 12 5l5.5 5.5"/></symbol>
+      <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.6 2.4 2.6 14.6 0 17M12 3.5c-2.6 2.4-2.6 14.6 0 17"/></symbol>
       <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 7 4 12l5 5"/><path d="M4 12h9a7 7 0 0 1 7 7v1"/></symbol>
       <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2.5"/></symbol>
       <symbol id="i-activity" viewBox="0 0 24 24"><path d="M4 12h3.5l2.5-6 3.5 12 2.5-6H20"/></symbol>
       <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16z"/><path d="m13.5 6.5 4 4"/></symbol>
       <symbol id="i-trash" viewBox="0 0 24 24"><path d="M5 7h14M10 7V5h4v2M7 7l1 13h8l1-13"/><path d="M10.5 11v5M13.5 11v5"/></symbol>
       <symbol id="i-loader" viewBox="0 0 24 24"><path d="M12 3.5a8.5 8.5 0 1 0 8.5 8.5"/></symbol>
+      <symbol id="i-highlight" viewBox="0 0 24 24"><path d="m4 20 1.1-3.8L14.7 6.6a2.1 2.1 0 0 1 3 3L8.1 19.2z"/><path d="m13.2 7.9 2.9 2.9"/><path d="M4 22h16"/></symbol>
+      <symbol id="i-fork" viewBox="0 0 24 24"><circle cx="6.5" cy="6" r="2.2"/><circle cx="17.5" cy="6.5" r="2.2"/><circle cx="6.5" cy="18" r="2.2"/><path d="M6.5 8.2v7.6"/><path d="M8.7 5.7c3.6-.6 6.6-.4 6.6 3.3v4.6"/></symbol>
     </defs>
   </svg>
 
@@ -214,6 +217,7 @@
           <div class="ai-context" hidden>
             <span class="ai-chip ai-chip-file" data-tip=""><svg><use href="#i-file"/></svg><span class="ai-chip-text"></span></span>
             <span class="ai-chip ai-chip-sel" hidden><svg><use href="#i-sparkle"/></svg><span class="ai-chip-text"></span><button type="button" class="ai-chip-x" data-action="ai-clear-selection" aria-label="Remove selection"><svg><use href="#i-x"/></svg></button></span>
+            <span class="ai-chip ai-chip-hl" hidden><svg><use href="#i-highlight"/></svg><span class="ai-chip-text"></span><button type="button" class="ai-chip-x" data-action="ai-clear-highlight" aria-label="Remove highlight"><svg><use href="#i-x"/></svg></button></span>
             <span class="ai-chip ai-chip-reply" hidden><svg><use href="#i-reply"/></svg><span class="ai-chip-text"></span><button type="button" class="ai-chip-x" data-action="ai-clear-reply" aria-label="Remove reply"><svg><use href="#i-x"/></svg></button></span>
           </div>
           <div class="ai-chat-total" hidden></div>
@@ -235,8 +239,14 @@
   <div class="toasts" role="status"></div>
   <div class="tooltip" role="tooltip" hidden></div>
   <div class="ctx-menu popover" role="menu" hidden></div>
-  <button class="ai-selchip popover" hidden><img src="assets/mark.png" alt="" width="20" height="20" /><span class="ai-selchip-label">Ask Mark</span></button>
+  <div class="ai-selchip popover" role="toolbar" aria-label="Selection actions" hidden>
+    <img src="assets/mark.png" alt="" width="20" height="20" />
+    <button class="ai-selchip-act ai-selchip-ask" type="button"><span class="ai-selchip-label">Ask Mark</span></button>
+    <span class="ai-selchip-sep"></span>
+    <button class="ai-selchip-act ai-selchip-hl" type="button" data-sel-action="highlight"><svg><use href="#i-highlight"/></svg><span>Highlight</span></button>
+  </div>
   <div class="ai-menu popover" role="menu" hidden></div>
+  <div class="hl-menu popover" role="menu" hidden></div>
 
   <dialog class="dialog dlg-settings" aria-labelledby="settings-title">
     <div class="dialog-head">
@@ -279,6 +289,19 @@
         <label class="search-field font-field"><input class="font-input" data-font="fontEditor" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Editor font" /></label>
       </div>
     </div>
+    <div class="card">
+      <div class="card-heading">Highlights</div>
+      <div class="row">
+        <div><div class="row-label">Chat counts</div><div class="row-desc">Show a reference number with how many chats a highlight has. <kbd>Alt</kbd> <kbd>H</kbd> hides all highlights.</div></div>
+        <button class="switch" role="switch" data-setting-toggle="highlightCount" aria-checked="true" aria-label="Show chat counts on highlights"></button>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Ctrl+Shift+Click</div><div class="row-desc">When a highlight has several chats, jump straight to one.</div></div>
+        <div class="segmented" data-setting="highlightJump">
+          <button data-value="latest">Latest chat</button><button data-value="oldest">Oldest chat</button>
+        </div>
+      </div>
+    </div>
     <div class="card ai-card">
       <div class="card-heading">Mark</div>
       <div class="row">
@@ -299,7 +322,23 @@
         <div><div class="row-label">Model</div><div class="row-desc">DeepSeek V4.1 Flash via the Command Code gateway.</div></div>
         <span class="ai-model-id">deepseek/deepseek-v4.1-flash</span>
       </div>
-      <p class="ai-privacy">Mark sends the open document to Command Code when you ask. Reasoning and chats stay on this device.</p>
+      <div class="row">
+        <div><div class="row-label">Search proxy</div><div class="row-desc ai-search-status">Checking…</div></div>
+        <div class="ai-key-box">
+          <label class="search-field ai-key-field"><input class="ai-search-input" type="password" placeholder="socks5h://127.0.0.1:9050" autocomplete="off" spellcheck="false" aria-label="Search proxy" /></label>
+          <button class="btn" data-action="ai-save-search">Save</button>
+          <button class="btn btn-ghost" data-action="ai-clear-search">Clear</button>
+        </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Direct search</div><div class="row-desc">Search engines see your IP. Off by default; Tor or a proxy is preferred.</div></div>
+        <button class="switch ai-direct-switch" role="switch" aria-checked="false" aria-label="Allow direct search"></button>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Search providers</div><div class="row-desc">Tried in order. Retries, extra proxies and SearXNG live in config.json.</div></div>
+        <span class="ai-model-id ai-search-providers">—</span>
+      </div>
+      <p class="ai-privacy">Mark sends the open document to Command Code when you ask. Reasoning and chats stay on this device. Web searches go through your configured proxy or Tor by default; queries are sent only to the chosen search engine.</p>
     </div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
          ids (for aria) are prefixed so rendered heading ids can't collide. -->
@@ -324,6 +363,7 @@
       <h2 id="ai-delete-title">Delete chat?</h2>
     </div>
     <p class="dialog-text">“<span class="ai-del-name"></span>” will be permanently deleted. This can't be undone.</p>
+    <p class="dialog-text ai-del-forks" hidden></p>
     <div class="dialog-foot">
       <span class="st-spacer"></span>
       <button class="btn btn-outline" value="cancel">Cancel</button>

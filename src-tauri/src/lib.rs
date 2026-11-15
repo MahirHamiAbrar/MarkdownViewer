@@ -14,6 +14,8 @@ use tauri::Manager;
 
 mod ai;
 mod chats;
+mod highlights;
+mod web_search;
 
 /// Syntect is the slowest step of a render; the preview re-renders on every edit, so
 /// unchanged code blocks reuse their highlighted HTML.
@@ -306,7 +308,12 @@ pub fn run() {
             chats::chats_list,
             chats::chat_load,
             chats::chat_save,
-            chats::chat_delete
+            chats::chat_delete,
+            highlights::highlights_load,
+            highlights::highlights_save,
+            web_search::search_status,
+            web_search::set_search_config,
+            web_search::set_search_direct
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

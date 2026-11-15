@@ -4,6 +4,14 @@ use std::path::{Path, PathBuf};
 use serde::Serialize;
 use tauri::Manager;
 
+/// Parent pointer for a forked conversation, flattened for the history tree.
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ForkRef {
+    pub id: String,
+    pub date: String,
+}
+
 /// Metadata shown in the chat history list. The full chat stays on disk.
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -12,10 +20,13 @@ pub struct ChatSummary {
     pub date: String,
     pub title: String,
     pub updated_at: String,
+    pub created_at: String,
     pub file_name: Option<String>,
     pub message_count: usize,
     pub tokens: u64,
     pub cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkRef>,
 }
 
 fn app_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -134,15 +145,21 @@ fn list_at(root: &Path) -> Vec<ChatSummary> {
                 continue;
             };
             let (input_tokens, output_tokens, cost) = summary_usage(&value);
+            let forked_from = value["forkedFrom"]["chatId"].as_str().map(|id| ForkRef {
+                id: id.to_string(),
+                date: value["forkedFrom"]["date"].as_str().unwrap_or("").to_string(),
+            });
             out.push(ChatSummary {
                 id: id.to_string(),
                 date: date.clone(),
                 title: value["title"].as_str().filter(|s| !s.is_empty()).unwrap_or("Untitled chat").to_string(),
                 updated_at: value["updatedAt"].as_str().unwrap_or("").to_string(),
+                created_at: value["createdAt"].as_str().unwrap_or("").to_string(),
                 file_name: value["file"]["name"].as_str().map(str::to_owned),
                 message_count: value["messages"].as_array().map_or(0, Vec::len),
                 tokens: input_tokens + output_tokens,
                 cost,
+                forked_from,
             });
         }
     }
@@ -229,6 +246,20 @@ mod tests {
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].title, "Newer");
         assert_eq!(listed[1].title, "Older");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn parses_fork_lineage_and_created_at() {
+        let root = root();
+        let json = r#"{"title":"Fork","createdAt":"2026-11-09T10:00:00Z","updatedAt":"2026-11-09T11:00:00Z","forkedFrom":{"chatId":"parent01","date":"2026-11-08","messageId":"m1","messageIndex":3},"messages":[]}"#;
+        save_at(&root, "2026-11-09", "fork0001", json).unwrap();
+        let listed = list_at(&root);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].created_at, "2026-11-09T10:00:00Z");
+        let fork = listed[0].forked_from.as_ref().unwrap();
+        assert_eq!(fork.id, "parent01");
+        assert_eq!(fork.date, "2026-11-08");
         let _ = fs::remove_dir_all(&root);
     }
 
