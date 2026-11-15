@@ -6,6 +6,17 @@ All notable changes to MarkdownEditor are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Export as HTML (Ctrl Shift E): one self-contained page with styles, math fonts and local
+  images embedded.
+- PDF and HTML files open in a built-in viewer, from the open dialog, the folder tree, drag and
+  drop, or the "Open" button shown after an export. PDFs use a bundled pdf.js.
+
+### Changed
+
+- Export as PDF (Ctrl P) writes the file directly on Linux instead of opening the print dialog.
+
 ## [0.2.0] - 2026-11-15
 
 ### Added

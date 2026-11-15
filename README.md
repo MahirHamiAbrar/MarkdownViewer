@@ -39,7 +39,8 @@ built with Tauri.
 - Configurable interface, document, and editor fonts (picks up the fonts installed on your system)
 - Reading width, line spacing, justified text, and code wrapping; editor tab width, autosave, and startup behavior
 - Saves are atomic, and unsaved text is recovered after a crash
-- Export the current document to PDF
+- Export the current document to PDF (Ctrl P) or to a self-contained HTML page (Ctrl Shift E); the app writes the file itself, no print dialog
+- Opens PDF and HTML files in a built-in viewer (PDFs through bundled pdf.js)
 
 **Mark (AI)**
 - Right-side assistant that always sees the open document, including unsaved edits
@@ -205,10 +206,10 @@ A `v*` tag builds, signs and publishes the `.deb` and `.AppImage`. See
 
 ## Architecture
 
-- `src/` — frontend: plain HTML/CSS/JS (no framework), with Mermaid and KaTeX vendored for diagrams and math
+- `src/` — frontend: plain HTML/CSS/JS (no framework), with Mermaid, KaTeX and pdf.js vendored for diagrams, math and the PDF viewer
 - `src-tauri/` — Rust backend (Tauri 2): Markdown rendering via
   [comrak](https://github.com/kivikakk/comrak), highlighting via syntect (two-face syntax set),
   HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the model
   provider layer (`providers.rs`, `ai.rs`, `anthropic.rs`: streaming, reasoning, usage/cost, keychain), chat storage, file tree, search, font
-  listing, and PDF printing commands
+  listing, and PDF export commands
 - `install.sh` — build + Linux desktop integration (desktop file, icons, MIME defaults)

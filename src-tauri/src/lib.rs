@@ -73,7 +73,8 @@ static SANITIZER: LazyLock<ammonia::Builder<'static>> = LazyLock::new(|| {
     b
 });
 
-const MD_EXTENSIONS: [&str; 3] = ["md", "markdown", "mdx"];
+// Markdown, plus the formats the app exports and can show in its viewer.
+const OPEN_EXTENSIONS: [&str; 6] = ["md", "markdown", "mdx", "pdf", "html", "htm"];
 const SKIP_DIRS: [&str; 3] = ["node_modules", "target", "dist"];
 
 fn options() -> Options<'static> {
@@ -178,9 +179,48 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Raw bytes for the PDF viewer, sent without JSON encoding.
+#[tauri::command(async)]
+fn read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
+    fs::read(&path).map(tauri::ipc::Response::new).map_err(|e| e.to_string())
+}
+
+/// Writes the page straight to a PDF at `path`, no print dialog. Resolves once the file is complete.
+#[cfg(target_os = "linux")]
 #[tauri::command]
-fn print_page(webview: tauri::Webview) -> Result<(), String> {
-    webview.print().map_err(|e| e.to_string())
+async fn export_pdf(webview: tauri::Webview, path: String) -> Result<bool, String> {
+    use webkit2gtk::PrintOperationExt;
+
+    let uri = gtk::glib::filename_to_uri(&path, None).map_err(|e| e.to_string())?;
+    let (tx, rx) = std::sync::mpsc::channel::<Result<(), String>>();
+    webview
+        .with_webview(move |w| {
+            let settings = gtk::PrintSettings::new();
+            settings.set_printer("Print to File");
+            settings.set(gtk::PRINT_SETTINGS_OUTPUT_FILE_FORMAT, Some("pdf"));
+            settings.set(gtk::PRINT_SETTINGS_OUTPUT_URI, Some(uri.as_str()));
+            let op = webkit2gtk::PrintOperation::new(&w.inner());
+            op.set_print_settings(&settings);
+            // `failed` is followed by `finished`; the receiver keeps the first message.
+            let failed = tx.clone();
+            op.connect_failed(move |_, e| drop(failed.send(Err(e.to_string()))));
+            op.connect_finished(move |_| drop(tx.send(Ok(()))));
+            op.print();
+        })
+        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || rx.recv().map_err(|e| e.to_string())?)
+        .await
+        .map_err(|e| e.to_string())?
+        .map(|()| true)
+}
+
+// ponytail: Windows and macOS still go through the system print dialog (returns false);
+// use WebView2 PrintToPdf / WKWebView createPDF when those platforms get release builds.
+#[cfg(not(target_os = "linux"))]
+#[tauri::command]
+async fn export_pdf(webview: tauri::Webview, path: String) -> Result<bool, String> {
+    let _ = path;
+    webview.print().map(|()| false).map_err(|e| e.to_string())
 }
 
 /// Opens another blank window alongside the current one. `?fresh=1` stops the
@@ -225,10 +265,10 @@ struct TreeNode {
     children: Option<Vec<TreeNode>>, // None = file
 }
 
-fn is_markdown(p: &Path) -> bool {
+fn is_openable(p: &Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())
-        .is_some_and(|e| MD_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
+        .is_some_and(|e| OPEN_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 // ponytail: depth 8 / 5000 files cap keeps huge trees responsive; lazy-load per folder if users need more.
@@ -253,7 +293,7 @@ fn walk(dir: &Path, depth: usize, budget: &mut usize) -> Vec<TreeNode> {
             if !children.is_empty() {
                 out.push(TreeNode { name, path: p.to_string_lossy().into_owned(), children: Some(children) });
             }
-        } else if is_markdown(&p) {
+        } else if is_openable(&p) {
             *budget -= 1;
             out.push(TreeNode { name, path: p.to_string_lossy().into_owned(), children: None });
         }
@@ -346,7 +386,8 @@ pub fn run() {
             write_file,
             initial_file,
             app_version,
-            print_page,
+            read_bytes,
+            export_pdf,
             new_window,
             list_markdown,
             search_files,

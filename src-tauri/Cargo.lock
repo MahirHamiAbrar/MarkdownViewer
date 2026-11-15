@@ -2480,6 +2480,7 @@ dependencies = [
  "ammonia",
  "comrak",
  "futures-util",
+ "gtk",
  "keyring",
  "reqwest 0.12.28",
  "serde",
@@ -2489,6 +2490,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "two-face",
+ "webkit2gtk",
 ]
 
 [[package]]

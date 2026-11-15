@@ -39,6 +39,7 @@ const el = {
   doc: $(".doc"),
   editor: $(".editor"),
   previewPane: $(".preview-pane"),
+  viewerPane: $(".viewer-pane"),
   preview: $(".md"),
   findbar: $(".findbar"),
   findInput: $(".find-input"),
@@ -89,6 +90,13 @@ const el = {
 };
 
 const MD_RE = /\.(md|markdown|mdx)$/i;
+const VIEW_RE = /\.(pdf|html?)$/i; // shown in the viewer frame, never edited
+const canOpen = (p) => MD_RE.test(p) || VIEW_RE.test(p);
+const OPEN_FILTERS = [
+  { name: "Documents", extensions: ["md", "markdown", "mdx", "pdf", "html", "htm"] },
+  { name: "Markdown", extensions: ["md", "markdown", "mdx"] },
+  { name: "All files", extensions: ["*"] },
+];
 const MAX_RECENTS = 30;
 const SIDEBAR_RECENTS = 6;
 const FONT_SIZES = ["13", "14", "16", "18"]; // the Font size setting's steps
@@ -133,6 +141,7 @@ const state = {
   untitled: false,  // new-file buffer not saved anywhere yet
   saved: "",        // content on disk
   text: "",         // content in editor
+  view: null,       // "pdf" | "html" when the open file is shown in the viewer frame instead
   mode: store.get("mode", "read"),
   recents: store.get("recents", []),
   folder: store.get("folder", null),
@@ -155,7 +164,7 @@ const debounce = (fn, ms) => { let t; return (...a) => { clearTimeout(t); t = se
 const svg = (name) => `<svg><use href="#i-${name}"/></svg>`;
 const baseName = (p) => p.split(/[\\/]/).pop();
 const dirName = (p) => p.slice(0, Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"))) || p;
-const isDirty = () => (state.path !== null || state.untitled) && state.text !== state.saved;
+const isDirty = () => !state.view && (state.path !== null || state.untitled) && state.text !== state.saved;
 
 function prettyDir(p) {
   let d = dirName(p);
@@ -197,7 +206,7 @@ function highlight(text, query) {
 }
 
 // ---------- toasts ----------
-function toast(message, kind = "success") {
+function toast(message, kind = "success", action = null) {
   const t = document.createElement("div");
   t.className = `toast popover ${kind}`;
   t.setAttribute("role", kind === "error" ? "alert" : "status");
@@ -206,11 +215,18 @@ function toast(message, kind = "success") {
   $(".toast-text", t).textContent = message;
   const close = () => { t.classList.add("leaving"); setTimeout(() => t.remove(), 200); };
   $("button", t).onclick = close;
+  if (action) { // { label, run }
+    const b = document.createElement("button");
+    b.className = "btn btn-ghost";
+    b.textContent = action.label;
+    b.onclick = () => { close(); action.run(); };
+    $(".toast-text", t).after(b);
+  }
   el.toasts.append(t);
   while (el.toasts.children.length > 3) el.toasts.firstElementChild.remove();
   // Errors stay until dismissed; success toasts auto-dismiss (paused on hover).
   if (kind !== "error") {
-    let timer = setTimeout(close, 3000);
+    let timer = setTimeout(close, action ? 8000 : 3000);
     t.onmouseenter = () => clearTimeout(timer);
     t.onmouseleave = () => { timer = setTimeout(close, 1500); };
   }
@@ -451,16 +467,19 @@ async function openFile(p, { fragment = null, find: query = null, line = null, q
     return true;
   }
   if (!(await settleUnsaved())) return false;
-  let text;
+  const view = VIEW_RE.test(p) ? (/\.pdf$/i.test(p) ? "pdf" : "html") : null;
+  let text = "";
+  let bytes = null;
   try {
-    text = await invoke("read_file", { path: p });
+    if (view) bytes = await invoke("read_bytes", { path: p }); // html: only proves the file is readable
+    else text = await invoke("read_file", { path: p });
   } catch {
     if (quiet) return false;
     toast(`Couldn't open “${baseName(p)}”. It may have been moved or deleted.`, "error");
     if (state.recents.includes(p)) removeRecent(p);
     return false;
   }
-  Object.assign(state, { path: p, saved: text, text, untitled: false });
+  Object.assign(state, { path: p, saved: text, text, untitled: false, view });
   renderSrc = null; // relative images resolve against the new file's folder
   el.editor.value = text;
   resetHistory();
@@ -468,6 +487,7 @@ async function openFile(p, { fragment = null, find: query = null, line = null, q
   store.set("lastFile", p);
   revealInTree(p);
   showDoc();
+  if (view) return showViewer(view, p, bytes);
   await renderPreview();
   el.previewPane.scrollTop = 0;
   el.editor.scrollTop = 0;
@@ -478,6 +498,7 @@ async function openFile(p, { fragment = null, find: query = null, line = null, q
 }
 
 async function save() {
+  if (state.view) return false; // viewer files are never written
   if (!state.path) return saveAs();
   try {
     await invoke("write_file", { path: state.path, contents: state.text });
@@ -493,6 +514,7 @@ async function save() {
 }
 
 async function saveAs() {
+  if (state.view) return false;
   const p = await dialog.save({ defaultPath: "Untitled.md", filters: [{ name: "Markdown", extensions: ["md", "markdown", "mdx"] }] });
   if (!p) return false;
   const path = MD_RE.test(p) ? p : p + ".md";
@@ -502,7 +524,7 @@ async function saveAs() {
     toast(`Couldn't save “${baseName(path)}”. ${err}`, "error");
     return false;
   }
-  Object.assign(state, { path, saved: state.text, untitled: false });
+  Object.assign(state, { path, saved: state.text, untitled: false, view: null });
   clearDraft();
   addRecent(path);
   store.set("lastFile", path);
@@ -517,7 +539,7 @@ async function saveAs() {
 
 async function newFile() {
   if (!(await settleUnsaved())) return;
-  Object.assign(state, { path: null, untitled: true, saved: "", text: "" });
+  Object.assign(state, { path: null, untitled: true, saved: "", text: "", view: null });
   renderSrc = null;
   el.editor.value = "";
   resetHistory();
@@ -535,7 +557,7 @@ async function newWindow() {
 }
 
 async function pickFile() {
-  const p = await dialog.open({ multiple: false, directory: false, filters: [{ name: "Markdown", extensions: ["md", "markdown", "mdx"] }, { name: "All files", extensions: ["*"] }] });
+  const p = await dialog.open({ multiple: false, directory: false, filters: OPEN_FILTERS });
   if (p) openFile(p);
 }
 
@@ -674,7 +696,10 @@ function decoratePreview(root) {
   for (const img of $$("img[src]", root)) {
     const src = img.getAttribute("src");
     if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src) && !src.startsWith("file:")) continue;
-    try { img.src = convertFileSrc(resolveLocal(src)); } catch { /* leave the broken image as-is */ }
+    try {
+      img.dataset.local = resolveLocal(src); // HTML export embeds the file from here
+      img.src = convertFileSrc(img.dataset.local);
+    } catch { /* leave the broken image as-is */ }
   }
   for (const box of $$('li > input[type="checkbox"]', root)) box.disabled = false; // clicking one edits the source
   decorateRich(root, { mermaid: true });
@@ -789,12 +814,51 @@ async function renderMermaid(block) {
   }
 }
 
+/** PDFs go to the bundled pdf.js viewer; HTML to a script-less sandboxed frame. */
+function showViewer(kind, path, bytes) {
+  const frame = document.createElement("iframe");
+  frame.className = "viewer";
+  frame.title = baseName(path);
+  if (kind === "html") {
+    frame.setAttribute("sandbox", ""); // local pages get no scripts: they could read any file through the asset protocol
+    // Slashes stay unencoded (unlike convertFileSrc) so the page's relative images and styles resolve.
+    frame.src = convertFileSrc("") + path.split(/[\\/]/).map(encodeURIComponent).join("/");
+  } else {
+    frame.src = "vendor/pdfjs/web/viewer.html?file=";
+    frame.onload = async () => {
+      try {
+        const win = frame.contentWindow;
+        await win.PDFViewerApplication.initializedPromise;
+        // A read-only viewer: no file opening, printing, saving or annotating from in here.
+        for (const id of ["secondaryOpenFile", "printButton", "secondaryPrint", "downloadButton", "secondaryDownload", "viewBookmark", "viewBookmarkSeparator", "editorModeButtons", "editorModeSeparator"]) {
+          win.document.getElementById(id)?.remove();
+        }
+        await win.PDFViewerApplication.open({ data: new Uint8Array(bytes) });
+      } catch (err) {
+        toast(`Couldn't show “${baseName(path)}”. ${err?.message || err}`, "error");
+      }
+    };
+  }
+  el.viewerPane.replaceChildren(frame);
+  return true;
+}
+// pdf.js announces itself here before it starts: match the app theme, and run nothing embedded in the PDF.
+document.addEventListener("webviewerloaded", (e) => {
+  const options = e.detail.source.PDFViewerApplicationOptions;
+  options.set("viewerCssTheme", getComputedStyle(el.root).colorScheme === "dark" ? 2 : 1);
+  options.set("enableScripting", false);
+  options.set("disableHistory", true);
+});
+
 function showDoc() {
   el.welcome.hidden = true;
   el.history.hidden = true;
   el.doc.hidden = false;
   el.status.hidden = false;
-  el.tbDoc.hidden = false;
+  el.tbDoc.hidden = !!state.view; // modes, find and export are for Markdown
+  el.doc.toggleAttribute("data-view", !!state.view);
+  if (!state.view) el.viewerPane.replaceChildren();
+  if (state.view) closeFind();
   setMode(state.mode);
   updateChrome();
   renderSidebar();
@@ -837,6 +901,7 @@ function updateStatus() {
 }
 
 function updateWords() {
+  if (state.view) return void (el.stWords.textContent = state.view === "pdf" ? "PDF document" : "HTML document");
   const words = (state.text.match(/[\p{L}\p{N}][\p{L}\p{N}'’_-]*/gu) || []).length;
   el.stWords.textContent = `${words.toLocaleString()} words · ${Math.max(1, Math.round(words / 230))} min read`;
 }
@@ -1039,7 +1104,7 @@ el.preview.addEventListener("click", async (e) => {
   const [rawPath, fragment = null] = href.split("#");
   if (!rawPath) return;
   const abs = resolveLocal(rawPath);
-  if (MD_RE.test(abs)) return openFile(abs, { fragment });
+  if (canOpen(abs)) return openFile(abs, { fragment });
   opener.openPath(abs).catch(() => toast(`Couldn't open “${baseName(abs)}”.`, "error"));
 });
 
@@ -1177,7 +1242,7 @@ function syncFindOpts() {
 }
 
 function openFind(query, { line = null, replace = false } = {}) {
-  if (!state.path) return;
+  if (!state.path || state.view) return;
   el.findbar.hidden = false;
   if (line !== null) { // a sidebar content hit is a plain-text query
     find.opts = { matchCase: false, word: false, regex: false };
@@ -1378,7 +1443,7 @@ function renderSidebar() {
     html += `<div class="group-label"><span title="${escapeHtml(state.folder)}">${escapeHtml(baseName(state.folder))}</span>
       <button class="icon-btn" data-action="refresh-folder" data-tip="Refresh" aria-label="Refresh folder">${svg("refresh")}</button>
       <button class="icon-btn" data-action="close-folder" data-tip="Close folder" aria-label="Close folder">${svg("x")}</button></div>`;
-    html += state.tree.length ? `<div role="tree">${treeHtml(state.tree, 0)}</div>` : `<div class="sb-empty">No Markdown files in this folder.</div>`;
+    html += state.tree.length ? `<div role="tree">${treeHtml(state.tree, 0)}</div>` : `<div class="sb-empty">No Markdown, PDF or HTML files in this folder.</div>`;
   }
   el.sbList.innerHTML = html;
 }
@@ -1457,8 +1522,8 @@ async function revealPath(p) {
   }
 }
 
-async function pdfOf(p) {
-  if (await openFile(p)) exportPdf();
+async function exportOf(p, run) {
+  if (await openFile(p)) run();
 }
 
 function hideMenu() { el.menu.hidden = true; }
@@ -1466,7 +1531,9 @@ function hideMenu() { el.menu.hidden = true; }
 function showMenu(item, x, y) {
   const p = item.dataset.path || item.dataset.dir;
   const entries = [["Open containing folder", "folder", () => revealPath(p)]];
-  if (item.dataset.path) entries.push(["Convert to PDF", "pdf", () => pdfOf(p)]);
+  if (item.dataset.path && MD_RE.test(p)) {
+    entries.push(["Convert to PDF", "pdf", () => exportOf(p, exportPdf)], ["Convert to HTML", "html", () => exportOf(p, exportHtml)]);
+  }
   menuRuns = entries.map((e) => e[2]);
   el.menu.innerHTML = entries.map(([label, icon], i) => `<button role="menuitem" data-i="${i}">${svg(icon)}${label}</button>`).join("");
   el.menu.hidden = false;
@@ -1623,6 +1690,7 @@ const actions = {
   "replace-one": replaceOne,
   "replace-all": replaceAll,
   pdf: exportPdf,
+  html: exportHtml,
   settings: openSettings,
   "new-file": newFile,
   "new-window": newWindow,
@@ -1655,12 +1723,104 @@ document.addEventListener("click", (e) => {
   if (m && m.closest(".tb-doc")) setMode(m.dataset.mode);
 });
 
-async function exportPdf() {
-  if (el.doc.hidden) return;
+// ---------- export ----------
+// The app writes the file itself. Only Linux can print to a file silently; elsewhere the system print dialog is the PDF route.
+const DIRECT_PDF = /Linux/.test(navigator.userAgent);
+
+/** Asks where to write an export, starting from the document's own folder and name. */
+async function exportTarget(ext, name) {
+  const base = state.path ? state.path.replace(/\.[^./\\]+$/, "") : "Untitled";
+  const p = await dialog.save({ defaultPath: `${base}.${ext}`, filters: [{ name, extensions: [ext] }] });
+  return p && (p.toLowerCase().endsWith(`.${ext}`) ? p : `${p}.${ext}`);
+}
+
+/** Brings the preview fully up to date: exports are made from it. */
+async function settlePreview() {
   closeFind();
-  await renderPreview(); // make sure the printed preview matches the editor
+  await renderPreview();
   await renderAllPending(); // off-screen math and diagrams are drawn lazily
-  try { await invoke("print_page"); } catch (err) { toast(`Couldn't open the print dialog. ${err}`, "error"); }
+}
+
+function exported(path) {
+  toast(`Exported “${baseName(path)}”.`, "success", { label: "Open", run: () => openFile(path) });
+  if (state.folder) loadTree().catch(() => {});
+}
+
+async function exportPdf() {
+  if (el.doc.hidden || state.view) return;
+  const path = DIRECT_PDF ? await exportTarget("pdf", "PDF") : "";
+  if (DIRECT_PDF && !path) return;
+  await settlePreview();
+  try {
+    if (await invoke("export_pdf", { path })) exported(path);
+  } catch (err) {
+    toast(`Couldn't export the PDF. ${err}`, "error");
+  }
+}
+
+const IMAGE_TYPES = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", avif: "image/avif", bmp: "image/bmp" };
+const dataUrl = (blob) => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(r.result);
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(blob);
+});
+
+/** The preview as one self-contained page: app styles inlined, KaTeX fonts embedded, same theme as on screen. */
+async function standaloneHtml() {
+  let css = "";
+  for (const sheet of document.styleSheets) {
+    let rules = [...sheet.cssRules].map((r) => r.cssText).join("\n");
+    const fonts = [...new Set([...rules.matchAll(/url\("?([^")]+\.woff2)"?\)/g)].map((m) => m[1]))];
+    for (const ref of fonts) {
+      const data = await dataUrl(await (await fetch(new URL(ref, sheet.href || location.href))).blob());
+      rules = rules.replaceAll(ref, data);
+    }
+    css += rules + "\n";
+  }
+  const body = el.preview.cloneNode(true);
+  for (const n of $$(".code-tools", body)) n.remove();
+  for (const box of $$('input[type="checkbox"]', body)) box.disabled = true;
+  for (const img of $$("img[data-local]", body)) { // local images travel inside the page
+    const type = IMAGE_TYPES[img.dataset.local.split(".").pop().toLowerCase()];
+    try {
+      if (type) img.src = await dataUrl(new Blob([await invoke("read_bytes", { path: img.dataset.local })], { type }));
+    } catch { /* missing file: the image stays broken, as in the preview */ }
+    img.removeAttribute("data-local");
+  }
+  const attrs = [...el.root.attributes].map((a) => `${a.name}="${escapeHtml(a.value)}"`).join(" ");
+  const title = escapeHtml((state.path ? baseName(state.path) : "Untitled").replace(/\.[^.]+$/, ""));
+  return `<!doctype html>
+<html ${attrs}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${title}</title>
+<style>
+${css}
+html, body { height: auto; overflow: visible; }
+body { background: var(--bg-app); }
+.md { margin: 0 auto; }
+</style>
+</head>
+<body>
+${body.outerHTML}
+</body>
+</html>
+`;
+}
+
+async function exportHtml() {
+  if (el.doc.hidden || state.view) return;
+  const path = await exportTarget("html", "HTML");
+  if (!path) return;
+  await settlePreview();
+  try {
+    await invoke("write_file", { path, contents: await standaloneHtml() });
+    exported(path);
+  } catch (err) {
+    toast(`Couldn't export the HTML. ${err?.message || err}`, "error");
+  }
 }
 
 // ---------- command palette ----------
@@ -1677,7 +1837,7 @@ function zoom(step) {
 
 /** Commands, plus (only while searching) the open document's headings and every known file. */
 function paletteCommands(q) {
-  const hasDoc = !!(state.path || state.untitled);
+  const hasDoc = !!(state.path || state.untitled) && !state.view;
   const editing = hasDoc && state.mode !== "read";
   const found = !q ? [] : [
     ...(hasDoc ? scanSource(state.text).headings : []).map((h, i) => ({ group: "Headings", icon: "chevron", title: h.text, run: () => gotoHeading(i) })),
@@ -1691,7 +1851,8 @@ function paletteCommands(q) {
     { group: "File", icon: "folder-plus", title: "Open Folder", key: "Ctrl Shift O", keywords: "directory workspace tree", run: pickFolder },
     { group: "File", icon: "save", title: "Save", key: "Ctrl S", keywords: "write store disk", on: hasDoc, run: () => save().then((ok) => ok && toast("Saved")) },
     { group: "File", icon: "save", title: "Save As", keywords: "write store disk copy new name", on: hasDoc, run: saveAs },
-    { group: "File", icon: "pdf", title: "Print / Export PDF", key: "Ctrl P", keywords: "print export pdf paper", on: hasDoc, run: exportPdf },
+    { group: "File", icon: "pdf", title: "Export as PDF", key: "Ctrl P", keywords: "print export convert pdf paper", on: hasDoc, run: exportPdf },
+    { group: "File", icon: "html", title: "Export as HTML", key: "Ctrl Shift E", keywords: "export convert html web page", on: hasDoc, run: exportHtml },
     { group: "File", icon: "clock", title: "Open History", keywords: "recent files last opened", run: openHistory },
     { group: "Editor", icon: "read", title: "Read Mode", key: "Alt R", keywords: "view preview rendered", on: hasDoc, run: () => setMode("read") },
     { group: "Editor", icon: "split", title: "Split Mode", key: "Alt S", keywords: "side by side live preview", on: hasDoc, run: () => setMode("split") },
@@ -1818,7 +1979,7 @@ document.addEventListener("keydown", (e) => {
     return;
   }
   const k = e.key.toLowerCase();
-  if (e.altKey && !mod && !e.shiftKey && state.path && !document.querySelector("dialog[open]")) {
+  if (e.altKey && !mod && !e.shiftKey && state.path && !state.view && !document.querySelector("dialog[open]")) {
     const mode = { r: "read", s: "split", e: "edit" }[k];
     if (mode) { e.preventDefault(); setMode(mode); }
     return;
@@ -1832,7 +1993,7 @@ document.addEventListener("keydown", (e) => {
     h: () => openFind(undefined, { replace: true }),
     p: () => (e.shiftKey ? openPalette() : exportPdf()),
     n: () => (e.shiftKey ? newWindow() : newFile()),
-    e: () => state.path && setMode({ read: "split", split: "edit", edit: "read" }[state.mode]),
+    e: () => (e.shiftKey ? exportHtml() : state.path && !state.view && setMode({ read: "split", split: "edit", edit: "read" }[state.mode])),
     b: toggleSidebar,
     ",": actions.settings,
     "=": () => zoom(1),
@@ -3468,9 +3629,9 @@ webview.onDragDropEvent((e) => {
   if (t === "enter" || t === "over") el.drop.hidden = false;
   else el.drop.hidden = true;
   if (t === "drop") {
-    const p = e.payload.paths.find((x) => MD_RE.test(x));
+    const p = e.payload.paths.find(canOpen);
     if (p) openFile(p);
-    else if (e.payload.paths.length) toast("Only Markdown files (.md, .markdown, .mdx) can be opened.", "error");
+    else if (e.payload.paths.length) toast("Only Markdown, PDF and HTML files can be opened.", "error");
   }
 });
 
@@ -3479,7 +3640,7 @@ webview.onDragDropEvent((e) => {
 let diskWarned = null; // disk content already warned about, so refocusing doesn't repeat the toast
 async function checkDisk() {
   const p = state.path;
-  if (!p) return;
+  if (!p || state.view) return;
   let text;
   try { text = await invoke("read_file", { path: p }); } catch { return; } // deleted or unreadable: keep the buffer
   if (p !== state.path || text === state.saved) return;

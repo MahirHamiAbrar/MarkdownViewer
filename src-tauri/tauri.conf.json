@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost https: data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; font-src 'self' data:; frame-src 'self' asset: http://asset.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": [
@@ -53,6 +53,20 @@
         "name": "Markdown document",
         "description": "Markdown document",
         "role": "Editor"
+      },
+      {
+        "ext": ["pdf"],
+        "mimeType": "application/pdf",
+        "name": "PDF document",
+        "description": "PDF document",
+        "role": "Viewer"
+      },
+      {
+        "ext": ["html", "htm"],
+        "mimeType": "text/html",
+        "name": "HTML document",
+        "description": "HTML document",
+        "role": "Viewer"
       }
     ]
   }

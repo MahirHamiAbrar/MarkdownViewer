@@ -447,6 +447,10 @@ kbd {
 .doc[data-mode="read"] .editor-pane, .doc[data-mode="edit"] .preview-pane { display: none; }
 .doc[data-mode="split"] .editor-pane { border-right: 1px solid var(--border-subtle); background: var(--bg-inset); }
 .editor-pane { display: flex; position: relative; }
+/* PDF and HTML files replace both panes with a viewer frame. */
+.doc[data-view] .editor-pane, .doc[data-view] .preview-pane, .doc:not([data-view]) .viewer-pane { display: none; }
+.viewer-pane { display: flex; overflow: hidden; }
+.viewer { flex: 1; border: 0; background: #fff; }
 /* Find highlights sit behind the textarea and must lay text out exactly like it. */
 .editor, .editor-hl {
   box-sizing: border-box; padding: 32px max(24px, calc((100% - var(--read-w)) / 2));
@@ -615,7 +619,8 @@ kbd {
 .toast.leaving { opacity: 0; transform: translateX(8px); }
 .toast .icon-tile { --tile: var(--success); }
 .toast.error .icon-tile { --tile: var(--danger); }
-.toast-text { flex: 1; padding-top: 1px; }
+.toast-text { flex: 1; padding-top: 1px; overflow-wrap: anywhere; }
+.toast .btn-ghost { flex: none; margin-top: -2px; color: var(--accent-text); }
 .toast .icon-btn { width: 24px; height: 24px; }
 .toast .icon-btn svg { width: 14px; height: 14px; }
 
