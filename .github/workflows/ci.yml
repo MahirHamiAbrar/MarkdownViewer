@@ -1,12 +1,20 @@
 name: CI
 
+# Pushes to main are tested by the Release workflow, which calls this one per platform.
 on:
   push:
-    branches: [main]
+    branches-ignore: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      os:
+        description: Runner to test on; all three when empty.
+        type: string
+        default: ""
 
 concurrency:
-  group: ci-${{ github.ref }}
+  # A call from Release is keyed by its run, so the three platform calls never cancel each other.
+  group: ci-${{ inputs.os && github.run_id || github.ref }}-${{ inputs.os }}
   cancel-in-progress: true
 
 permissions:
@@ -18,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         # ubuntu-22.04 (glibc 2.35) matches the release build.
-        os: [ubuntu-22.04, macos-latest, windows-latest]
+        os: ${{ fromJSON(inputs.os && format('["{0}"]', inputs.os) || '["ubuntu-22.04", "macos-latest", "windows-latest"]') }}
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
