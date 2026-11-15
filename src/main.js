@@ -496,6 +496,7 @@ const tabDirty = (tab) => (tab.id === state.tab ? isDirty() : !tab.lazy && !tab.
 
 function saveTabs() {
   if (IS_MAIN) store.set("lastTabs", { paths: state.tabs.map(tabPath).filter(Boolean), active: state.path });
+  watchSoon();
 }
 
 function stashTab() {
@@ -740,7 +741,15 @@ const MAX_RECENT_WORKSPACES = 10;
 
 function saveWorkspace() {
   if (IS_MAIN) store.set("workspace", state.workspace);
+  watchSoon();
 }
+
+// The backend watches the workspace folders and the folders of every other open file, and reports
+// changes as "fs-changed" (see the listener near checkDisk).
+const watchSoon = debounce(() => {
+  const files = [...new Set([...state.workspace.files, ...state.tabs.map(tabPath).filter(Boolean)])];
+  invoke("watch_paths", { folders: state.workspace.folders, files }).catch(() => { /* the focus check still catches changes */ });
+}, 300);
 
 /** The workspace folder `p` lives in (the innermost, when folders nest), or null for a loose file. */
 function rootOf(p) {
@@ -3942,11 +3951,13 @@ async function checkParkedTabs() {
   }
 }
 
-addEventListener("focus", () => {
+function syncWithDisk() {
   checkDisk();
   checkParkedTabs();
   loadTree({ ifChanged: true }).catch(() => { /* keep the last listing */ });
-});
+}
+appWindow.listen("fs-changed", syncWithDisk);
+addEventListener("focus", syncWithDisk); // also covers paths the watcher could not take
 
 // ---------- boot ----------
 (async function boot() {
@@ -3966,6 +3977,7 @@ addEventListener("focus", () => {
   loadAiMemory();
   for (const dir of state.workspace.folders) state.expanded.add(dir);
   loadTree().catch(() => {});
+  watchSoon();
   // Path shortening (~) is cosmetic: apply it when it arrives instead of waiting on it.
   tpath.homeDir().then((home) => {
     state.home = home.replace(/[\\/]$/, "");

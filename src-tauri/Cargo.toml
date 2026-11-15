@@ -25,6 +25,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "str
 futures-util = "0.3"
 keyring = "4"
 ignore = "0.4"
+notify-debouncer-mini = "0.6"
 
 # Already in the tree through tauri; named here for the direct PDF export.
 [target.'cfg(target_os = "linux")'.dependencies]

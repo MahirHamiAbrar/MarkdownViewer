@@ -323,9 +323,12 @@ pub fn run() {
     builder
         .manage(PendingOpens(Mutex::new(HashMap::from([("main".to_string(), request)]))))
         .manage(LastFocused(Mutex::new("main".into())))
+        .manage(workspace::Watchers::default())
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Focused(true) = event {
-                *window.state::<LastFocused>().0.lock().unwrap() = window.label().to_string();
+            match event {
+                tauri::WindowEvent::Focused(true) => *window.state::<LastFocused>().0.lock().unwrap() = window.label().to_string(),
+                tauri::WindowEvent::Destroyed => drop(window.state::<workspace::Watchers>().0.lock().unwrap().remove(window.label())),
+                _ => {}
             }
         })
         .setup(|app| {
@@ -354,6 +357,7 @@ pub fn run() {
             new_window,
             workspace::list_workspace,
             workspace::search_files,
+            workspace::watch_paths,
             list_fonts,
             ai::ai_chat,
             ai::ai_cancel,

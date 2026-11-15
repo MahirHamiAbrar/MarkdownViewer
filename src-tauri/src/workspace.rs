@@ -1,10 +1,15 @@
 //! The folders a window has open: the sidebar tree, the file index for Big Brain, and search.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Duration;
 
+use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
+use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use serde::Serialize;
+use tauri::Emitter;
 
 // Markdown, plus the formats the app exports and can show in its viewer.
 const OPEN_EXTENSIONS: [&str; 6] = ["md", "markdown", "mdx", "pdf", "html", "htm"];
@@ -170,6 +175,50 @@ pub fn search_files(paths: Vec<String>, query: String) -> Vec<Hit> {
     hits
 }
 
+/// One file watcher per window, by window label. Dropping a watcher stops it.
+#[derive(Default)]
+pub struct Watchers(pub Mutex<HashMap<String, Debouncer<RecommendedWatcher>>>);
+
+/// Build output and VCS internals change constantly and never show in the app.
+fn is_noise(path: &Path) -> bool {
+    path.components().any(|part| {
+        let name = part.as_os_str().to_string_lossy();
+        SKIP_DIRS.contains(&name.as_ref()) || (name.starts_with('.') && name.len() > 1 && name != "..")
+    })
+}
+
+/// Watches this window's folders (recursively) and the folders of its loose files, replacing the
+/// previous watch. Changes arrive in the window as one debounced `fs-changed` event.
+// ponytail: a path that cannot be watched (inotify limit, folder gone) is skipped silently; the
+// window still re-checks the disk whenever it regains focus.
+#[tauri::command]
+pub fn watch_paths(window: tauri::WebviewWindow, watchers: tauri::State<Watchers>, folders: Vec<String>, files: Vec<String>) -> Result<(), String> {
+    let label = window.label().to_string();
+    let target = window.clone();
+    let mut debouncer = new_debouncer(Duration::from_millis(300), move |result: DebounceEventResult| {
+        let paths: Vec<String> = result
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|event| !is_noise(&event.path))
+            .map(|event| event.path.to_string_lossy().into_owned())
+            .collect();
+        if !paths.is_empty() {
+            let _ = target.emit_to(target.label(), "fs-changed", paths);
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    for folder in &folders {
+        let _ = debouncer.watcher().watch(Path::new(folder), RecursiveMode::Recursive);
+    }
+    // Editors save by replacing the file, which drops a watch on the file itself: watch its folder.
+    let parents: HashSet<&Path> = files.iter().filter_map(|file| Path::new(file).parent()).collect();
+    for parent in parents.into_iter().filter(|parent| !folders.iter().any(|folder| parent.starts_with(folder))) {
+        let _ = debouncer.watcher().watch(parent, RecursiveMode::NonRecursive);
+    }
+    watchers.0.lock().unwrap().insert(label, debouncer);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,6 +246,9 @@ mod tests {
         assert_eq!(roots[0].files, [at("docs/Guide.md"), at("notes.txt")]);
         assert!(!roots[0].truncated);
         assert!(text_files(&root, 1).1);
+
+        assert!(is_noise(&root.join("node_modules/pkg/readme.md")) && is_noise(&root.join(".git/index")));
+        assert!(!is_noise(&root.join("docs/Guide.md")));
 
         let hits = search_files(vec![at("docs/Guide.md")], "quick".into());
         assert_eq!(hits.len(), 1);
