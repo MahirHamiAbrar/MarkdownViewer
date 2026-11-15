@@ -28,6 +28,7 @@ const MARK_RULES = `You are Big Brain, the assistant built into Markdown, a desk
 ## Context and tools
 - "Document" below is the file the user has in front of them. A small file is included whole. A large one is shown as an outline with line numbers: read the parts you need before answering about them, and never describe text you have not read.
 - "Workspace" in the Session section is everything else the user has open: folders and single files. When file tools are available you can list, search and read any text file in it (notes, code, configuration). Use them when the question reaches beyond the open document; say which files you relied on.
+- PDFs are not text files. Call pdf_inspect on a PDF first: it tells you, page by page, whether there is a text layer, embedded images, or only a scan. Then use pdf_text for pages with text, and pdf_view (when available) to look at scanned pages and at pages whose figures matter. Never guess what an image or a scanned page shows; if you cannot view it, say so.
 - The user points at files with @path. Those arrive as "[Attached file — path]" blocks ahead of the message; a large one is cut short and says so, and a folder arrives as a listing. Read more with the file tools, by the same path.
 - Call tools without announcing them or narrating what you are about to do.
 - Call a tool only when the text you need is not already in this conversation. Prefer one wide read over several narrow ones, and search before reading when you do not know where something is.
@@ -145,7 +146,7 @@ function historyStart(messages, from = 0, budget = MARK_LIMITS.history, keepRece
 }
 
 /** Tool definitions for this request; a tool is only offered when it can do something. */
-function markTools({ largeDoc, hasFiles, memory }) {
+function markTools({ largeDoc, hasFiles, memory, pdf, vision }) {
   const tool = (name, description, properties = {}, required = Object.keys(properties)) =>
     ({ type: "function", function: { name, description, parameters: { type: "object", properties, required } } });
   const int = (description) => ({ type: "integer", description });
@@ -163,6 +164,14 @@ function markTools({ largeDoc, hasFiles, memory }) {
       tool("search_files", "Search every text file in the workspace for a phrase (case-insensitive). Returns path:line: text.", { query: str("Phrase to find") }),
       tool("read_file", "Read a text file from the workspace. Returns numbered lines.", { path: str("Path as returned by list_files or search_files, or as written in an @mention"), start_line: int("First line, default 1"), end_line: int("Last line, default end of file") }, ["path"]),
     );
+  }
+  if (pdf) {
+    const path = str("PDF path as returned by list_files or written in an @mention; omit for the PDF the user has open");
+    tools.push(
+      tool("pdf_inspect", "Examine a PDF before reading it: page count, and for each page whether it has a text layer, embedded images, or is a scan. Always call this first for a PDF; its result says which tool fits which pages.", { path, first_page: int("First page to examine, default 1") }, []),
+      tool("pdf_text", "Extract the text layer of PDF pages. For pages pdf_inspect reports as having text.", { path, first_page: int("First page, default 1"), last_page: int("Last page, default the last") }, []),
+    );
+    if (vision) tools.push(tool("pdf_view", "Look at PDF pages as images (up to 4 per call). For scanned pages, and for pages whose figures, photos, charts or layout matter.", { path, first_page: int("First page"), last_page: int("Last page, default first_page") }, ["first_page"]));
   }
   if (memory) {
     tools.push(
@@ -246,6 +255,8 @@ if (typeof module !== "undefined") {
     assert.deepEqual(names({ largeDoc: true, hasFiles: true, memory: true }), ["read_document", "search_document", "list_files", "search_files", "read_file", "remember", "forget"]);
     assert.deepEqual(markTools({ hasFiles: true })[2].function.parameters.required, ["path"]);
     assert.deepEqual(markTools({ hasFiles: true })[0].function.parameters.required, [], "list_files takes an optional folder");
+    assert.deepEqual(names({ pdf: true, vision: true }), ["pdf_inspect", "pdf_text", "pdf_view"]);
+    assert.deepEqual(names({ pdf: true, vision: false }), ["pdf_inspect", "pdf_text"], "no page images for a model that cannot see them");
 
     const known = { "src/main.js": { id: 1 }, "my notes/a b.md": { id: 2 }, "docs/": { id: 3 } };
     const resolve = (name) => known[name] || null;

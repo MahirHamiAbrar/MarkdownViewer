@@ -15,6 +15,12 @@ fn text_of(content: &Value) -> String {
     }
 }
 
+/// A `data:image/...;base64,...` URL as an image block; anything else is dropped.
+fn image_block(url: &Value) -> Option<Value> {
+    let (media_type, data) = url.as_str()?.strip_prefix("data:")?.split_once(";base64,")?;
+    Some(json!({ "type": "image", "source": { "type": "base64", "media_type": media_type, "data": data } }))
+}
+
 /// Builds a Messages API request. `effort` (the wire spelling) turns adaptive thinking on;
 /// models without an Effort menu are sent neither parameter.
 pub fn body(
@@ -59,7 +65,14 @@ pub fn body(
                 }
             }
             "tool" => {
-                let result = json!({ "type": "tool_result", "tool_use_id": message.get("tool_call_id"), "content": text_of(&content) });
+                // A tool may return pictures (`images`, data URLs) beside its text: PDF pages for the model to look at.
+                let images: Vec<Value> = message.get("images").and_then(Value::as_array).into_iter().flatten().filter_map(image_block).collect();
+                let result_content = if images.is_empty() {
+                    json!(text_of(&content))
+                } else {
+                    Value::Array(std::iter::once(json!({ "type": "text", "text": text_of(&content) })).chain(images).collect())
+                };
+                let result = json!({ "type": "tool_result", "tool_use_id": message.get("tool_call_id"), "content": result_content });
                 // Every result of one round belongs in a single user message.
                 let merged = out.last_mut().and_then(|last| last.get_mut("content")).and_then(Value::as_array_mut).filter(|blocks| {
                     blocks.first().and_then(|block| block.get("type")).and_then(Value::as_str) == Some("tool_result")
@@ -267,6 +280,7 @@ mod tests {
             ] }),
             json!({ "role": "tool", "tool_call_id": "a", "content": "hit" }),
             json!({ "role": "tool", "tool_call_id": "b", "content": "text" }),
+            json!({ "role": "tool", "tool_call_id": "c", "content": "page 1", "images": ["data:image/jpeg;base64,AAAA", "https://not-inline"] }),
             json!({ "role": "assistant", "content": "ignored", "provider_blocks": [{ "type": "thinking", "thinking": "", "signature": "sig" }, { "type": "text", "text": "kept" }] }),
         ];
         let tools = vec![json!({ "type": "function", "function": { "name": "search", "description": "d", "parameters": { "type": "object" } } })];
@@ -278,7 +292,12 @@ mod tests {
         assert_eq!(sent[1]["content"][0], json!({ "type": "tool_use", "id": "a", "name": "search", "input": { "q": "x" } }));
         assert_eq!(sent[1]["content"][1]["input"], json!({}), "bad arguments become an empty object");
         assert_eq!(sent[2]["role"], "user");
-        assert_eq!(sent[2]["content"].as_array().unwrap().len(), 2, "both results in one message");
+        assert_eq!(sent[2]["content"].as_array().unwrap().len(), 3, "every result in one message");
+        assert_eq!(
+            sent[2]["content"][2]["content"],
+            json!([{ "type": "text", "text": "page 1" }, { "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "AAAA" } }]),
+            "images ride inside the tool result"
+        );
         assert_eq!(sent[2]["content"][1], json!({ "type": "tool_result", "tool_use_id": "b", "content": "text" }));
         assert_eq!(sent[3]["content"][0]["signature"], "sig");
         assert_eq!(body["tools"][0], json!({ "name": "search", "description": "d", "input_schema": { "type": "object" } }));

@@ -196,7 +196,7 @@ impl Route {
             return anthropic::body(&self.model.id, messages, tools, tool_choice, effort.and_then(|e| e.wire.as_deref()), max_tokens, stream);
         }
         let compat = &self.provider.compat;
-        let messages: Vec<Value> = messages.into_iter().map(strip_provider_blocks).collect();
+        let messages = with_tool_images(messages.into_iter().map(strip_provider_blocks).collect());
         let mut body = json!({ "model": self.model.id, "messages": messages, "stream": stream });
         body[compat.max_tokens_field.as_deref().unwrap_or("max_tokens")] = json!(max_tokens);
         if stream {
@@ -229,6 +229,32 @@ impl Route {
 pub(crate) struct Effort {
     level: String,
     wire: Option<String>,
+}
+
+/// Chat-completions tool messages are text only. Pictures a tool returned (`images`, data URLs: PDF
+/// pages) follow the round's tool messages as one user message instead.
+fn with_tool_images(messages: Vec<Value>) -> Vec<Value> {
+    fn flush(out: &mut Vec<Value>, images: &mut Vec<Value>) {
+        if images.is_empty() {
+            return;
+        }
+        let mut parts = vec![json!({ "type": "text", "text": "[Page images returned by the tool call above, in order. Not written by the user.]" })];
+        parts.extend(images.drain(..).map(|url| json!({ "type": "image_url", "image_url": { "url": url } })));
+        out.push(json!({ "role": "user", "content": parts }));
+    }
+    let mut out = Vec::with_capacity(messages.len());
+    let mut images = Vec::new();
+    for mut message in messages {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            flush(&mut out, &mut images);
+        }
+        if let Some(Value::Array(found)) = message.as_object_mut().and_then(|object| object.remove("images")) {
+            images.extend(found);
+        }
+        out.push(message);
+    }
+    flush(&mut out, &mut images);
+    out
 }
 
 fn strip_provider_blocks(mut message: Value) -> Value {
@@ -761,6 +787,18 @@ data: [DONE]"#,
         assert_eq!(body["thinking"]["type"], "disabled");
         assert!(body.get("reasoning_effort").is_none());
         assert!(body["messages"][0].get("provider_blocks").is_none());
+
+        // Tool images move into a user message placed after the whole round of tool results.
+        let round = vec![
+            json!({ "role": "assistant", "content": "", "tool_calls": [] }),
+            json!({ "role": "tool", "tool_call_id": "a", "content": "pages attached", "images": ["data:image/jpeg;base64,AAAA"] }),
+            json!({ "role": "tool", "tool_call_id": "b", "content": "text" }),
+            json!({ "role": "assistant", "content": "done" }),
+        ];
+        let sent = deepseek.body(round, vec![], "auto", None, 100, false).unwrap()["messages"].take();
+        assert_eq!(sent.as_array().unwrap().iter().map(|m| m["role"].as_str().unwrap()).collect::<Vec<_>>(), ["assistant", "tool", "tool", "user", "assistant"]);
+        assert!(sent[1].get("images").is_none());
+        assert_eq!(sent[3]["content"][1], json!({ "type": "image_url", "image_url": { "url": "data:image/jpeg;base64,AAAA" } }));
         assert_eq!((&body["max_tokens"], &body["tool_choice"]), (&json!(100), &json!("auto")));
         let high = deepseek.effort("").unwrap(); // the route's default
         let body = deepseek.body(messages(), vec![], "auto", high.as_ref(), 100, false).unwrap();

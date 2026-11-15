@@ -19,8 +19,8 @@ pub const ANTHROPIC_VERSION: &str = "2026-10-21";
 const KEYCHAIN_SERVICE: &str = "MarkdownEditor";
 const MAX_MODELS: usize = 2000;
 /// Fields a saved provider entry may carry; anything else from the webview is dropped.
-const FIELDS: [&str; 10] =
-    ["name", "api", "baseURL", "apiKeyEnv", "noKey", "reasoning", "reasoningEfforts", "compat", "headers", "models"];
+const FIELDS: [&str; 11] =
+    ["name", "api", "baseURL", "apiKeyEnv", "noKey", "reasoning", "reasoningEfforts", "compat", "headers", "models", "vision"];
 
 /// Effort level shown in the menu -> the spelling sent on the wire. `None` sends nothing.
 pub type Efforts = BTreeMap<String, Option<String>>;
@@ -37,6 +37,9 @@ pub struct Model {
     pub max_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_efforts: Option<Efforts>,
+    /// Whether the model accepts images; unset falls back to the provider's `vision`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
 }
 
 /// Request-shape switches for gateways that differ from the plain protocol.
@@ -79,6 +82,9 @@ pub struct Provider {
     pub reasoning_efforts: Option<Efforts>,
     #[serde(default)]
     pub compat: Compat,
+    /// Whether this route's models accept images (page images of a PDF). Unset means yes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision: Option<bool>,
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
@@ -119,7 +125,7 @@ fn catalog() -> Vec<(&'static str, Value)> {
         ("deepseek", json!({
             "name": "DeepSeek", "api": OPENAI, "baseURL": "https://api.deepseek.com", "apiKeyEnv": "DEEPSEEK_API_KEY",
             "reasoning": "high", "reasoningEfforts": { "off": null, "low": "low", "high": "high", "max": "max" },
-            "compat": { "thinkingFormat": "deepseek" },
+            "compat": { "thinkingFormat": "deepseek" }, "vision": false,
         })),
         ("openai", json!({
             "name": "OpenAI", "api": OPENAI, "baseURL": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY",
@@ -142,7 +148,7 @@ fn catalog() -> Vec<(&'static str, Value)> {
         ("commandcode", json!({
             "name": "Command Code", "api": OPENAI, "baseURL": "https://api.commandcode.ai/provider/v1", "apiKeyEnv": "CMD_API_KEY",
             "reasoning": "high", "reasoningEfforts": { "off": "off", "low": "low", "high": "high", "max": "max" },
-            "models": [{ "id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash" }],
+            "models": [{ "id": "deepseek/deepseek-v4.1-flash", "name": "DeepSeek V4.1 Flash", "vision": false }],
         })),
     ]
 }
@@ -419,6 +425,7 @@ fn parse_models(provider: &Provider, body: &Value) -> Vec<Model> {
                 context_window: number(item, &["max_input_tokens", "context_length", "context_window"]),
                 max_tokens: number(item, &["max_tokens", "max_output_tokens"]),
                 reasoning_efforts: if provider.api == ANTHROPIC { anthropic_efforts(item) } else { None },
+                vision: None,
             })
         })
         .take(MAX_MODELS)

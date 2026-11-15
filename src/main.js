@@ -121,7 +121,8 @@ const AI_EFFORT_INFO = {
 const AI_MAX_REASONING = 100_000;
 const AI_TOOL_LABELS = {
   read_document: "Read document", search_document: "Searched document", list_files: "Listed files",
-  search_files: "Searched folder", read_file: "Read file", remember: "Remembered", forget: "Forgot",
+  search_files: "Searched workspace", read_file: "Read file", remember: "Remembered", forget: "Forgot",
+  pdf_inspect: "Inspected PDF", pdf_text: "Read PDF text", pdf_view: "Looked at PDF pages",
 };
 const aiEffortName = (value) => AI_EFFORT_INFO[value]?.[0] || value || "";
 
@@ -2468,13 +2469,16 @@ function systemPrompt(chat) {
     MARK_RULES,
     memoryContext(state.ai.memory, aiMemoryOn()),
     `## Session\nDate: ${localDate()}${workspace}`,
-    documentContext(aiDocument(), scanSource),
+    state.view === "pdf"
+      ? `## Document\nName: ${baseName(state.path)}\nPath: ${displayPath(state.path)}\nThe document in front of the user is a PDF. None of it is included here: call pdf_inspect (no path needed) to see what its pages hold, then read them.`
+      : documentContext(aiDocument(), scanSource),
     chat.summary ? `## Earlier in this conversation (summary)\n${chat.summary}` : "",
   ].filter(Boolean).join("\n\n");
 }
 
 function aiTools() {
-  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFiles: workspaceFiles().length > 0, memory: aiMemoryOn() });
+  const files = workspaceFiles();
+  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFiles: files.length > 0, memory: aiMemoryOn(), pdf: state.view === "pdf" || files.some(isPdf), vision: aiVision() });
 }
 
 /** The workspace file a name from the model or an @mention refers to: absolute, display path, or a unique path ending. */
@@ -2535,7 +2539,7 @@ async function mentionAttachments(text) {
       continue;
     }
     if (/\.pdf$/i.test(entry.path)) {
-      out.push({ path: entry.label, kind: "note", text: "This is a PDF. It has not been read yet." });
+      out.push({ path: entry.label, kind: "note", text: "This is a PDF and has not been read yet. Call pdf_inspect on it, then pdf_text or pdf_view." });
       continue;
     }
     let body;
@@ -3013,6 +3017,7 @@ async function compactAiHistory(chat, current) {
 /** One answer: model rounds with tool calls in between. Tool results live only inside this turn. */
 async function runAssistantTurn(chat, effort, channel) {
   const current = state.ai.current;
+  pdfClose(); // PDFs parsed for the previous answer
   await compactAiHistory(chat, current);
   const messages = buildApiMessages(chat);
   const tools = aiTools();
@@ -3058,7 +3063,7 @@ async function runAssistantTurn(chat, effort, channel) {
       ...(reply.providerBlocks ? { provider_blocks: reply.providerBlocks } : {}), // handed back unchanged; see anthropic.rs
       tool_calls: calls.map((call) => ({ id: call.id, type: "function", function: { name: call.name, arguments: call.arguments } })),
     });
-    for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, content: await runAiToolCall(current, call) });
+    for (const call of calls) messages.push({ role: "tool", tool_call_id: call.id, ...(await runAiToolCall(current, call)) });
     // Later rounds stream onto the same message; keep what is shown equal to what will be saved.
     current.msg.content = content.length ? `${content.join("\n\n")}\n\n` : "";
     current.msg.reasoning = reasoning.length ? `${reasoning.join("\n\n")}\n\n` : "";
@@ -3073,11 +3078,11 @@ async function runAiToolCall(current, call) {
     let args = {};
     try { args = JSON.parse(call.arguments || "{}") || {}; } catch { throw new Error("The arguments were not valid JSON."); }
     const out = await runAiTool(call.name, args);
-    result = out.result;
+    result = { content: out.result, ...(out.images?.length ? { images: out.images } : {}) }; // images: see ai.rs / anthropic.rs
     action.detail = out.detail;
     action.status = "done";
   } catch (err) {
-    result = `Error: ${err?.message || err}`;
+    result = { content: `Error: ${err?.message || err}` };
     action.detail = String(err?.message || err);
     action.status = "error";
   }
@@ -3085,6 +3090,19 @@ async function runAiToolCall(current, call) {
   scrollAiIfPinned();
   return result;
 }
+
+const isPdf = (path) => /\.pdf$/i.test(path || "");
+/** Whether the chosen model takes images; unknown counts as yes (see `vision` in providers.rs). */
+const aiVision = () => (state.ai.current?.model ?? aiCurrent()?.model)?.vision ?? (state.ai.current?.provider ?? aiCurrent()?.provider)?.vision ?? true;
+
+/** The PDF a tool call means: a workspace path, or the PDF in front of the user when none is given. */
+function resolvePdf(name) {
+  const path = String(name || "").trim() ? resolveWorkspaceFile(name) : state.view === "pdf" ? state.path : null;
+  if (!path) throw new Error(String(name || "").trim() ? "No such file in the workspace. Call list_files for valid paths." : "path is required: no PDF is open.");
+  if (!isPdf(path)) throw new Error("That is not a PDF. Use read_file.");
+  return path;
+}
+const readPdfBytes = (path) => invoke("read_bytes", { path });
 
 /** Runs one tool for the model. Files are limited to the text files of the workspace. */
 async function runAiTool(name, args) {
@@ -3119,9 +3137,23 @@ async function runAiTool(name, args) {
     case "read_file": {
       const path = resolveWorkspaceFile(args.path);
       if (!path) throw new Error("No such file in the workspace. Call list_files for valid paths.");
-      if (/\.pdf$/i.test(path)) throw new Error("That is a PDF, not a text file.");
+      if (isPdf(path)) throw new Error("That is a PDF, not a text file. Call pdf_inspect on it.");
       const out = numberedLines(await workspaceText(path), args.start_line, args.end_line);
       return { result: `${displayPath(path)}\n${out.text}`, detail: `${displayPath(path)} · lines ${out.from}–${out.to}` };
+    }
+    // pdfctx.js: inspect first, then extracted text or page images, whichever the pages call for.
+    case "pdf_inspect": {
+      const path = resolvePdf(args.path);
+      return pdfInspect(path, displayPath(path), readPdfBytes, { first: args.first_page, vision: aiVision() });
+    }
+    case "pdf_text": {
+      const path = resolvePdf(args.path);
+      return pdfText(path, displayPath(path), readPdfBytes, { first: args.first_page, last: args.last_page, cap: MARK_LIMITS.read });
+    }
+    case "pdf_view": {
+      if (!aiVision()) throw new Error("The current model cannot view images.");
+      const path = resolvePdf(args.path);
+      return pdfView(path, displayPath(path), readPdfBytes, { first: args.first_page, last: args.last_page });
     }
     case "remember": {
       if (!aiMemoryOn()) throw new Error("Memory is turned off.");
