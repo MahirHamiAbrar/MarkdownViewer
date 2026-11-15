@@ -12,6 +12,8 @@
     "core:window:allow-is-maximized",
     "dialog:default",
     "opener:default",
+    "updater:default",
+    "process:allow-restart",
     { "identifier": "opener:allow-open-path", "allow": [{ "path": "**" }] }
   ]
 }

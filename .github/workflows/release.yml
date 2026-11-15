@@ -121,18 +121,24 @@ jobs:
       - name: Build
         shell: bash
         env:
+          # Signs the in-app updater payloads (minisign); the public key is in tauri.conf.json.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
           SIGN_KEY: ${{ env.GPG_KEY_ID }}
           APPIMAGETOOL_SIGN_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
           APPIMAGETOOL_FORCE_SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
-        run: npx tauri build ${{ matrix.args }}
+        run: |
+          [ -n "$TAURI_SIGNING_PRIVATE_KEY" ] || { echo "::error::Add the TAURI_SIGNING_PRIVATE_KEY and TAURI_SIGNING_PRIVATE_KEY_PASSWORD repository secrets; auto-update payloads must be signed."; exit 1; }
+          npx tauri build ${{ matrix.args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       - name: Collect
         shell: bash
         run: |
           mkdir dist
           find "${{ matrix.out }}" -maxdepth 2 -type f \
-            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \
+               -o -name '*.app.tar.gz' -o -name '*.AppImage.sig' -o -name '*-setup.exe.sig' -o -name '*.app.tar.gz.sig' \) \
             -exec cp {} dist/ \;
           ls -l dist
           [ -n "$(ls dist)" ] || { echo "::error::No packages found under ${{ matrix.out }}"; exit 1; }
@@ -160,6 +166,26 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: notes
+
+      # The in-app updater reads this manifest from releases/latest/download/latest.json.
+      - name: Updater manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ${{ github.repository }}
+        run: |
+          cd dist
+          entry() { # $1 = package file
+            [ -f "$1" ] && [ -f "$1.sig" ] || { echo "::error::Missing updater package or signature: $1" >&2; exit 1; }
+            jq -n --arg url "https://github.com/$REPO/releases/download/$TAG/$1" --rawfile sig "$1.sig" '{url: $url, signature: $sig}'
+          }
+          appimage="$(ls *.AppImage)"; setup="$(ls *-setup.exe)"; mac="$(ls *.app.tar.gz)"
+          linux="$(entry "$appimage")"; windows="$(entry "$setup")"; darwin="$(entry "$mac")"
+          jq -n --arg v "$VERSION" --rawfile notes ../notes.md --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --argjson linux "$linux" --argjson windows "$windows" --argjson darwin "$darwin" \
+            '{version: $v, notes: $notes, pub_date: $date, platforms: {
+              "linux-x86_64": $linux, "windows-x86_64": $windows,
+              "darwin-x86_64": $darwin, "darwin-aarch64": $darwin }}' > latest.json
+          cat latest.json
 
       - name: Import the signing key
         env:

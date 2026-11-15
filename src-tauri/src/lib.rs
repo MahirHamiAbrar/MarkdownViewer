@@ -211,6 +211,13 @@ fn app_version(app: tauri::AppHandle) -> String {
     app.package_info().version.to_string()
 }
 
+/// Whether the updater can replace this install in place. On Linux only the AppImage can;
+/// a .deb or install.sh copy belongs to the package manager / user and gets a download link instead.
+#[tauri::command]
+fn update_supported() -> bool {
+    !cfg!(target_os = "linux") || std::env::var_os("APPIMAGE").is_some()
+}
+
 /// Raw bytes for the PDF viewer, sent without JSON encoding.
 #[tauri::command(async)]
 fn read_bytes(path: String) -> Result<tauri::ipc::Response, String> {
@@ -346,6 +353,8 @@ pub fn run() {
         })
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(ai::AiState::default())
         .invoke_handler(tauri::generate_handler![
             render_markdown,
@@ -354,6 +363,7 @@ pub fn run() {
             initial_open,
             classify_paths,
             app_version,
+            update_supported,
             read_bytes,
             export_pdf,
             new_window,

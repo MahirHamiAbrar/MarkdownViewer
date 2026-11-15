@@ -36,6 +36,7 @@ built with Tauri.
 **Look & feel**
 - Frameless, translucent window with custom chrome (minimize / maximize / close)
 - Reader-friendly Sage and Plum themes (default, following the system), Paper, Midnight, Sepia, Dusk, E-ink and Forest, plus Light, Dark, Monokai, and Vercel, with an accent color picker
+- Frosted-glass popups and menus, toggled with **Settings → Turn on Blur Effect**: on by default on macOS and Windows, off on Linux, where WebKitGTK usually cannot draw the blur ([why](docs/BLUR.md))
 - Configurable interface, document, and editor fonts (picks up the fonts installed on your system)
 - Reading width, line spacing, justified text, and code wrapping; editor tab width, autosave, and startup behavior
 - Saves are atomic, and unsaved text is recovered after a crash

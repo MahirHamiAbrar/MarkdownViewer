@@ -6,6 +6,16 @@ All notable changes to MarkdownEditor are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Click an image or a Mermaid diagram to expand it: drag to move, scroll or pinch to zoom,
+  double-click to zoom in, `0` fits, `1` shows actual size, Esc closes.
+- Automatic updates: the app checks GitHub Releases, downloads and installs new versions in the
+  background with a progress bar, and asks you to restart. Settings → Updates turns automatic
+  checks and installs off, and has Check for updates and Install latest update buttons.
+  In-place updates work for the AppImage, macOS and Windows builds; `.deb` installs get a
+  download link.
+
 ## [0.2.2] - 2026-11-15
 
 ### Added
