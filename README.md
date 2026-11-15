@@ -42,25 +42,25 @@ built with Tauri.
 - Export the current document to PDF (Ctrl P) or to a self-contained HTML page (Ctrl Shift E); the app writes the file itself, no print dialog
 - Opens PDF and HTML files in a built-in viewer (PDFs through bundled pdf.js)
 
-**Mark (AI)**
+**Big Brain (AI)**
 - Right-side assistant that always sees the open document, including unsaved edits
 - Works with DeepSeek, OpenAI, Anthropic, OpenRouter, a local Ollama, or any OpenAI- or Anthropic-compatible endpoint
-- Select any text to reveal **Ask Mark**; the selection is attached alongside the full file
+- Select any text to reveal **Ask Big Brain**; the selection is attached alongside the full file
 - Streaming Markdown answers with an expandable **Thinking** disclosure and an **Actions** trace
 - Per-message token usage, plus chat totals and cost when the gateway reports it
 - Chats are saved under `~/.markdowneditor/chats`, named by the model, and can be renamed or deleted
-- Large documents are sent as an outline; Mark reads and searches the parts it needs, and can search and read the other Markdown files of the open folder
-- **About you** notes and a **Memory** of lasting preferences personalize every chat (Settings → Mark)
+- Large documents are sent as an outline; Big Brain reads and searches the parts it needs, and can search and read the other Markdown files of the open folder
+- **About you** notes and a **Memory** of lasting preferences personalize every chat (Settings → Big Brain)
 
-## Mark (AI)
+## Big Brain (AI)
 
-Mark answers through a model provider you choose. Nothing is configured out of the box, and
-the document text is sent to that provider only when you ask Mark a question. With a local
+Big Brain answers through a model provider you choose. Nothing is configured out of the box, and
+the document text is sent to that provider only when you ask Big Brain a question. With a local
 provider such as Ollama, nothing leaves your computer.
 
 ### Adding a provider
 
-**Settings → Mark → Add model provider.**
+**Settings → Big Brain → Add model provider.**
 
 - **Third-party model provider**: pick DeepSeek, OpenAI, Anthropic, OpenRouter, Ollama, or
   Command Code and paste its API key (Ollama needs none). The model list is fetched from the
@@ -69,7 +69,7 @@ provider such as Ollama, nothing leaves your computer.
   chats and saved keys refer to it), the base URL, the API protocol (`openai-completions` or
   `anthropic-messages`), a key, and model ids, or leave the models empty to fetch them.
 
-Pick the model, and its reasoning effort where it has one, from the menu in Mark's header. The
+Pick the model, and its reasoning effort where it has one, from the menu in Big Brain's header. The
 choice becomes the default for new chats; each chat remembers its own.
 
 ### API keys
@@ -112,13 +112,13 @@ Chats persist as JSON at `~/.markdowneditor/chats/<date>/<id>.json`, including m
 reasoning, actions, and token/cost usage. Stored reasoning is never replayed to the model.
 
 **Context.** A document up to 60,000 characters is sent whole; a larger one is sent as a heading
-outline with line numbers, and Mark fetches ranges with its `read_document` / `search_document`
+outline with line numbers, and Big Brain fetches ranges with its `read_document` / `search_document`
 tools. With a folder open it also gets `list_files`, `search_files`, and `read_file`, limited to
 that folder's Markdown files. Long chats are folded into a summary once they pass about 48,000
 characters. The prompt is ordered so the provider's prefix cache keeps hitting between turns.
 
-**Personalization and memory.** Settings → Mark has an **About you** box that is included in every
-chat, and a **Memory** switch. With memory on, Mark saves lasting facts and preferences you mention
+**Personalization and memory.** Settings → Big Brain has an **About you** box that is included in every
+chat, and a **Memory** switch. With memory on, Big Brain saves lasting facts and preferences you mention
 (you get a toast each time) and you can delete any of them in Settings. Both live in
 `~/.markdowneditor/memory.json` (mode 0600) and are sent to the selected provider with your questions.
 

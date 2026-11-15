@@ -16,6 +16,7 @@ All notable changes to MarkdownEditor are listed here. The format follows
 ### Changed
 
 - Export as PDF (Ctrl P) writes the file directly on Linux instead of opening the print dialog.
+- The assistant is now called **Big Brain** (it was "Mark").
 
 ## [0.2.0] - 2026-11-15
 

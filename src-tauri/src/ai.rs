@@ -104,7 +104,7 @@ pub enum AiEvent {
     },
 }
 
-/// What Mark knows about the user: `{ "profile": "...", "items": [{ id, text, createdAt }] }`.
+/// What Big Brain knows about the user: `{ "profile": "...", "items": [{ id, text, createdAt }] }`.
 /// ponytail: one small JSON file, rewritten whole. Move to SQLite if memory ever needs search or grows past a few hundred facts.
 #[tauri::command(async)]
 pub fn memory_load(app: AppHandle) -> String {

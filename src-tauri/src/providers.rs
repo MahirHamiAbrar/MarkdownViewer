@@ -1,4 +1,4 @@
-//! Model providers for Mark, shaped after deepseek-harness: a provider is a route with a
+//! Model providers for Big Brain, shaped after deepseek-harness: a provider is a route with a
 //! permanent lowercase id, a wire protocol (`api`), a base URL, a credential and a model list.
 //! Built-in routes come from `catalog()`; `providers.json` in the app folder overrides them
 //! field by field and adds custom ones.

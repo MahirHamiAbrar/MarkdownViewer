@@ -154,7 +154,7 @@ const state = {
     open: false, chat: null, list: [], streaming: false, requestId: null, selection: null, reply: null,
     renderTimer: null, pinned: true, current: null, chip: null, deleteTarget: null, titleBusy: false,
     providers: [], // model providers with their key status; see providers.rs
-    memory: normalizeMemory(null), // what Mark knows about the user; lives in ~/.markdowneditor/memory.json
+    memory: normalizeMemory(null), // what Big Brain knows about the user; lives in ~/.markdowneditor/memory.json
   },
 };
 
@@ -1824,7 +1824,7 @@ async function exportHtml() {
 }
 
 // ---------- command palette ----------
-const PALETTE_GROUPS = ["File", "Editor", "View", "Mark", "Preferences", "Help", "Headings", "Files"];
+const PALETTE_GROUPS = ["File", "Editor", "View", "Big Brain", "Preferences", "Help", "Headings", "Files"];
 const PALETTE_DYNAMIC_MAX = 8; // rows shown per Headings / Files group
 let paletteMatches = [];
 let paletteSel = 0;
@@ -1867,9 +1867,9 @@ function paletteCommands(q) {
     { group: "View", icon: "plus", title: "Zoom In", key: "Ctrl +", keywords: "bigger larger font size text", run: () => zoom(1) },
     { group: "View", icon: "min", title: "Zoom Out", key: "Ctrl -", keywords: "smaller font size text", run: () => zoom(-1) },
     { group: "View", icon: "refresh", title: "Reset Zoom", key: "Ctrl 0", keywords: "default font size text", run: () => zoom(0) },
-    { group: "Mark", icon: "sparkle", title: "Toggle Mark", key: "Ctrl Shift M", keywords: "ai assistant chat sidebar panel", run: toggleAiPanel },
-    { group: "Mark", icon: "plus", title: "New Chat with Mark", keywords: "ai assistant conversation clean", run: () => { openAiPanel(); newAiChat(); } },
-    { group: "Mark", icon: "clock", title: "Mark Chat History", keywords: "ai assistant saved chats conversations", run: () => openAiHistory() },
+    { group: "Big Brain", icon: "sparkle", title: "Toggle Big Brain", key: "Ctrl Shift M", keywords: "ai assistant chat sidebar panel", run: toggleAiPanel },
+    { group: "Big Brain", icon: "plus", title: "New Chat with Big Brain", keywords: "ai assistant conversation clean", run: () => { openAiPanel(); newAiChat(); } },
+    { group: "Big Brain", icon: "clock", title: "Big Brain Chat History", keywords: "ai assistant saved chats conversations", run: () => openAiHistory() },
     { group: "Preferences", icon: "settings", title: "Settings", key: "Ctrl ,", keywords: "preferences appearance theme themes dark light accent color font fonts typography typeface size reading width interface document editor", run: openSettings },
     { group: "Help", icon: "info", title: "About Markdown", keywords: "version about info credits app", run: openAbout },
     ...found,
@@ -2004,7 +2004,7 @@ document.addEventListener("keydown", (e) => {
   if (run) { e.preventDefault(); run(); }
 });
 
-// ---------- Mark (AI) ----------
+// ---------- Big Brain (AI) ----------
 function nanoid8() {
   const alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_-";
   const bytes = new Uint8Array(8);
@@ -2130,8 +2130,8 @@ function renderAiEmpty() {
   const suggestions = emptySuggestions();
   el.aiMessages.innerHTML = `<div class="ai-empty">
     <img src="assets/mark.png" alt="" width="56" height="56" />
-    <h2>Ask Mark</h2>
-    <p>${file ? `Mark can read <b>${escapeHtml(file.name)}</b> and answer in Markdown.` : "Open a file and Mark will read it with you."}</p>
+    <h2>Ask Big Brain</h2>
+    <p>${file ? `Big Brain can read <b>${escapeHtml(file.name)}</b> and answer in Markdown.` : "Open a file and Big Brain will read it with you."}</p>
     <div class="ai-suggestions">${suggestions.map(([label, prompt]) =>
       `<button class="ai-suggest" data-ai-prompt="${escapeHtml(prompt)}">${svg("sparkle")}${escapeHtml(label)}</button>`).join("")}</div>
   </div>`;
@@ -2198,7 +2198,7 @@ function aiTools() {
 function apiUserContent(message) {
   const parts = [];
   if (message.reply?.text) {
-    const who = message.reply.role === "assistant" ? "Mark's" : "the user's";
+    const who = message.reply.role === "assistant" ? "Big Brain's" : "the user's";
     parts.push(`[Replying to this part of ${who} previous message]\n${message.reply.text}`);
   }
   if (message.selection?.text) {
@@ -2355,7 +2355,7 @@ function renderAiMessage(msg, index) {
       quote.className = "ai-sel-quote ai-reply-quote";
       quote.title = msg.reply.text;
       const label = document.createElement("b");
-      label.textContent = msg.reply.role === "assistant" ? "Replying to Mark" : "Replying to your message";
+      label.textContent = msg.reply.role === "assistant" ? "Replying to Big Brain" : "Replying to your message";
       quote.append(label, document.createTextNode(`${msg.reply.text.slice(0, 600)}${msg.reply.text.length > 600 ? "…" : ""}`));
       node.append(quote);
     }
@@ -2378,7 +2378,7 @@ function renderAiMessage(msg, index) {
   node.className = "ai-msg ai-msg-assistant";
   node.innerHTML = `<header class="ai-msg-head">
       <img class="ai-avatar-sm" src="assets/mark.png" alt="" width="20" height="20" />
-      <span class="ai-name">Mark</span>
+      <span class="ai-name">Big Brain</span>
       <span class="ai-tag">${escapeHtml(msg.modelName || "DeepSeek V4.1 Flash")}</span>
       <span class="ai-tag ai-tag-effort"></span>
       <time class="ai-time"></time>
@@ -2513,11 +2513,11 @@ async function sendAiMessage(text) {
   const value = String(text || "").trim();
   if (!value) return;
   if (state.ai.streaming) {
-    toast("Stop Mark first.", "error");
+    toast("Stop Big Brain first.", "error");
     return;
   }
   if (!aiCurrent()) {
-    toast("Choose a model first: Settings → Mark → Add model provider.", "error");
+    toast("Choose a model first: Settings → Big Brain → Add model provider.", "error");
     return;
   }
   if (!state.ai.open) openAiPanel({ focus: false });
@@ -2545,7 +2545,7 @@ async function requestAssistant() {
   if (!chat || !chat.messages.length || state.ai.streaming) return;
   const target = aiCurrent();
   if (!target) {
-    toast("Choose a model first: Settings → Mark → Add model provider.", "error");
+    toast("Choose a model first: Settings → Big Brain → Add model provider.", "error");
     return;
   }
   chat.provider = target.provider.id;
@@ -2610,7 +2610,7 @@ async function compactAiHistory(chat, current) {
   if (start <= from) return;
   setAiPhase(current.node, "Summarizing earlier messages…");
   const transcript = sent.slice(from, start).filter((message) => message.content)
-    .map((message) => `${message.role === "user" ? "User" : "Mark"}: ${message.content.slice(0, 3000)}`).join("\n\n");
+    .map((message) => `${message.role === "user" ? "User" : "Big Brain"}: ${message.content.slice(0, 3000)}`).join("\n\n");
   const action = { kind: "context", id: "summary", label: "Summarized earlier messages", detail: `${start - from} messages`, status: "done" };
   try {
     chat.summary = await invoke("ai_complete", {
@@ -2618,7 +2618,7 @@ async function compactAiHistory(chat, current) {
       model: chat.model,
       maxTokens: 800,
       messages: [
-        { role: "system", content: "You compress a conversation between a user and Mark, a Markdown document assistant, so it can continue without the original messages. Keep what the user is trying to do, decisions and conclusions reached, facts and names later turns may rely on, and any open question. Drop pleasantries and exact wording. Write terse bullet points, at most 250 words." },
+        { role: "system", content: "You compress a conversation between a user and Big Brain, a Markdown document assistant, so it can continue without the original messages. Keep what the user is trying to do, decisions and conclusions reached, facts and names later turns may rely on, and any open question. Drop pleasantries and exact wording. Write terse bullet points, at most 250 words." },
         { role: "user", content: `${chat.summary ? `Summary so far:\n${chat.summary}\n\n` : ""}Messages to fold in:\n${transcript}\n\nUpdated summary:` },
       ],
     });
@@ -2745,7 +2745,7 @@ async function runAiTool(name, args) {
       if (!aiMemoryOn()) throw new Error("Memory is turned off.");
       const item = await changeAiMemory((memory) => rememberFact(memory, args.text));
       if (!item) throw new Error("text is empty.");
-      toast(`Mark will remember: ${item.text}`);
+      toast(`Big Brain will remember: ${item.text}`);
       return { result: `Saved as [${item.id}].`, detail: item.text };
     }
     case "forget": {
@@ -2775,7 +2775,7 @@ async function changeAiMemory(change) {
   try {
     await invoke("memory_save", { json: JSON.stringify({ version: 1, ...state.ai.memory }) });
   } catch (err) {
-    toast(`Couldn't save Mark's memory. ${err}`, "error");
+    toast(`Couldn't save Big Brain's memory. ${err}`, "error");
     throw err;
   }
   renderAiMemory();
@@ -2786,7 +2786,7 @@ function renderAiMemory() {
   const items = state.ai.memory.items;
   el.aiMemoryList.innerHTML = items.length
     ? items.map((item) => `<li><span>${escapeHtml(item.text)}</span><button class="icon-btn sm" data-action="ai-forget" data-id="${escapeHtml(item.id)}" data-tip="Forget" aria-label="Forget this memory">${svg("trash")}</button></li>`).join("")
-    : `<li class="ai-memory-empty">Nothing saved yet. Tell Mark about yourself or how you like answers, and it will remember.</li>`;
+    : `<li class="ai-memory-empty">Nothing saved yet. Tell Big Brain about yourself or how you like answers, and it will remember.</li>`;
 }
 
 el.aiProfile.addEventListener("input", debounce(() => {
@@ -2974,7 +2974,7 @@ function renderAiHistory() {
 
 async function openAiChat(id, date) {
   if (state.ai.streaming) {
-    toast("Stop Mark first.", "error");
+    toast("Stop Big Brain first.", "error");
     return false;
   }
   try {
@@ -3031,7 +3031,7 @@ el.aiDelDlg.addEventListener("close", async () => {
 
 function newAiChat() {
   if (state.ai.streaming) {
-    toast("Stop Mark first.", "error");
+    toast("Stop Big Brain first.", "error");
     return;
   }
   hideSelChip();
@@ -3095,7 +3095,7 @@ function updateAiToggle() {
   el.win.dataset.ai = state.ai.open ? "open" : "closed";
 }
 
-// ---------- Mark: model providers ----------
+// ---------- Big Brain: model providers ----------
 const aiProviderById = (id) => state.ai.providers.find((provider) => provider.id === id);
 const aiUsable = (provider) => (provider.hasKey || provider.noKey) && provider.models.length > 0;
 const aiModelName = (target) => (target ? target.model.name || target.model.id : "Select model");
@@ -3230,7 +3230,7 @@ function renderAiProviders() {
       ${provider.noKey ? "" : `<div class="ai-key-box"><label class="search-field ai-key-field"><input type="password" placeholder="${provider.hasKey ? "Replace API key" : "Paste API key"}" autocomplete="off" spellcheck="false" aria-label="${name} API key" /></label>
         <button class="btn" data-prov-act="key">Save</button></div>`}
     </div>`;
-  }).join("") || `<p class="row-desc ai-prov-empty">No provider yet. Add one to start chatting with Mark.</p>`;
+  }).join("") || `<p class="row-desc ai-prov-empty">No provider yet. Add one to start chatting with Big Brain.</p>`;
 }
 
 async function fetchAiModels(id, { quiet = false } = {}) {
@@ -3351,7 +3351,7 @@ function hideSelChip() {
 
 function showSelChip(info, anchorRect, point) {
   state.ai.chip = info;
-  const label = info.kind === "reply" ? (info.role === "assistant" ? "Reply Mark" : "Reply") : "Ask Mark";
+  const label = info.kind === "reply" ? (info.role === "assistant" ? "Reply Big Brain" : "Reply") : "Ask Big Brain";
   $(".ai-selchip-label", el.aiSelChip).textContent = label;
   el.aiSelChip.setAttribute("aria-label", label);
   el.aiSelChip.hidden = false;
@@ -3516,7 +3516,7 @@ el.aiHistoryList.addEventListener("click", (e) => {
   const rename = e.target.closest("[data-ai-rename-chat]");
   if (rename) {
     if (state.ai.streaming) {
-      toast("Stop Mark first.", "error");
+      toast("Stop Big Brain first.", "error");
       return;
     }
     openAiChat(rename.dataset.aiRenameChat, rename.dataset.chatDate).then((ok) => { if (ok) startAiRename(); });

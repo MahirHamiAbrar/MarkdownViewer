@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn converts_a_tool_round() {
         let messages = vec![
-            json!({ "role": "system", "content": "You are Mark." }),
+            json!({ "role": "system", "content": "You are Big Brain." }),
             json!({ "role": "user", "content": "Find it" }),
             json!({ "role": "assistant", "content": "", "tool_calls": [
                 { "id": "a", "type": "function", "function": { "name": "search", "arguments": "{\"q\":\"x\"}" } },
@@ -272,7 +272,7 @@ mod tests {
         let tools = vec![json!({ "type": "function", "function": { "name": "search", "description": "d", "parameters": { "type": "object" } } })];
         let body = body("claude-x", messages, tools, "none", Some("high"), 1000, true).unwrap();
 
-        assert_eq!(body["system"], "You are Mark.");
+        assert_eq!(body["system"], "You are Big Brain.");
         let sent = body["messages"].as_array().unwrap();
         assert_eq!(sent.len(), 4, "{sent:#?}");
         assert_eq!(sent[1]["content"][0], json!({ "type": "tool_use", "id": "a", "name": "search", "input": { "q": "x" } }));

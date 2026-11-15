@@ -1,5 +1,5 @@
 "use strict";
-// Pure helpers that decide what Mark (the AI) is sent. Loaded after mdsource.js and before main.js;
+// Pure helpers that decide what Big Brain (the AI) is sent. Loaded after mdsource.js and before main.js;
 // `node src/markctx.js` runs the self-check.
 
 const MARK_LIMITS = {
@@ -16,7 +16,7 @@ const MARK_LIMITS = {
 
 // The prompt is ordered by how often each part changes (rules, then memory, then the document, then
 // the summary) so the gateway's prefix cache keeps hitting while the user chats about one file.
-const MARK_RULES = `You are Mark, the assistant built into Markdown, a desktop Markdown viewer and editor. You help the user read, understand, write, and revise their documents.
+const MARK_RULES = `You are Big Brain, the assistant built into Markdown, a desktop Markdown viewer and editor. You help the user read, understand, write, and revise their documents.
 
 ## Answering
 - Lead with the answer. Match length to the question. No preamble, no restating the question, no closing offers.

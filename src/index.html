@@ -75,7 +75,7 @@
         <button class="icon-btn" data-action="html" data-tip="Export as HTML" data-key="Ctrl Shift E" aria-label="Export as HTML"><svg><use href="#i-html"/></svg></button>
       </div>
       <div class="tb-group">
-        <button class="icon-btn" data-action="toggle-ai" data-tip="Mark (AI)" data-key="Ctrl Shift M" aria-label="Toggle Mark AI" aria-pressed="false"><svg><use href="#i-sparkle"/></svg></button>
+        <button class="icon-btn" data-action="toggle-ai" data-tip="Big Brain (AI)" data-key="Ctrl Shift M" aria-label="Toggle Big Brain AI" aria-pressed="false"><svg><use href="#i-sparkle"/></svg></button>
         <button class="icon-btn" data-action="settings" data-tip="Settings" data-key="Ctrl ," aria-label="Settings"><svg><use href="#i-settings"/></svg></button>
         <span class="tb-sep"></span>
         <button class="win-btn" data-action="minimize" aria-label="Minimize"><svg><use href="#i-min"/></svg></button>
@@ -177,8 +177,8 @@
         </footer>
       </main>
 
-      <div class="ai-splitter" role="separator" aria-orientation="vertical" aria-label="Resize Mark panel" hidden></div>
-      <aside class="ai-panel" aria-label="Mark, AI assistant" hidden>
+      <div class="ai-splitter" role="separator" aria-orientation="vertical" aria-label="Resize Big Brain panel" hidden></div>
+      <aside class="ai-panel" aria-label="Big Brain, AI assistant" hidden>
         <header class="ai-head">
           <img class="ai-avatar" src="assets/mark.png" alt="" width="26" height="26" />
           <div class="ai-head-text">
@@ -192,14 +192,14 @@
           </div>
           <button class="icon-btn sm" data-action="ai-history" data-tip="Chat history" aria-label="Chat history"><svg><use href="#i-clock"/></svg></button>
           <button class="icon-btn sm" data-action="ai-new" data-tip="New chat" aria-label="New chat"><svg><use href="#i-plus"/></svg></button>
-          <button class="icon-btn sm" data-action="toggle-ai" data-tip="Close Mark" aria-label="Close Mark"><svg><use href="#i-x"/></svg></button>
+          <button class="icon-btn sm" data-action="toggle-ai" data-tip="Close Big Brain" aria-label="Close Big Brain"><svg><use href="#i-x"/></svg></button>
         </header>
         <div class="ai-body">
           <div class="ai-messages" role="log" aria-live="polite">
             <div class="ai-empty">
               <img src="assets/mark.png" alt="" width="56" height="56" />
-              <h2>Ask Mark</h2>
-              <p>Mark reads the document you have open and answers in Markdown.</p>
+              <h2>Ask Big Brain</h2>
+              <p>Big Brain reads the document you have open and answers in Markdown.</p>
               <div class="ai-suggestions">
                 <button class="ai-suggest" data-ai-prompt="What can you help me with?"><svg><use href="#i-sparkle"/></svg>What can you help me with?</button>
                 <button class="ai-suggest" data-ai-prompt="How do you use the document I have open?"><svg><use href="#i-sparkle"/></svg>How do you use my document?</button>
@@ -223,11 +223,11 @@
           </div>
           <div class="ai-chat-total" hidden></div>
           <div class="ai-input-row">
-            <textarea class="ai-input" rows="1" placeholder="Ask Mark about this file…" aria-label="Message Mark"></textarea>
+            <textarea class="ai-input" rows="1" placeholder="Ask Big Brain about this file…" aria-label="Message Big Brain"></textarea>
             <button class="btn btn-primary ai-send" type="submit" aria-label="Send" data-tip="Send"><svg><use href="#i-send"/></svg></button>
             <button class="btn ai-stop" type="button" data-action="ai-stop" aria-label="Stop" data-tip="Stop" hidden><svg><use href="#i-stop"/></svg></button>
           </div>
-          <p class="ai-foot">Mark sees the open file · <kbd>Enter</kbd> send · <kbd>Shift</kbd><kbd>Enter</kbd> new line</p>
+          <p class="ai-foot">Big Brain sees the open file · <kbd>Enter</kbd> send · <kbd>Shift</kbd><kbd>Enter</kbd> new line</p>
         </form>
       </aside>
     </div>
@@ -240,7 +240,7 @@
   <div class="toasts" role="status"></div>
   <div class="tooltip" role="tooltip" hidden></div>
   <div class="ctx-menu popover" role="menu" hidden></div>
-  <button class="ai-selchip popover" hidden><img src="assets/mark.png" alt="" width="20" height="20" /><span class="ai-selchip-label">Ask Mark</span></button>
+  <button class="ai-selchip popover" hidden><img src="assets/mark.png" alt="" width="20" height="20" /><span class="ai-selchip-label">Ask Big Brain</span></button>
   <div class="ai-menu popover" role="menu" hidden></div>
 
   <dialog class="dialog dlg-settings" aria-labelledby="settings-title">
@@ -327,24 +327,24 @@
       </div>
     </div>
     <div class="card ai-card">
-      <div class="card-heading">Mark</div>
+      <div class="card-heading">Big Brain</div>
       <div class="row">
-        <div><div class="row-label">Models</div><div class="row-desc">The providers Mark can answer through. Keys are stored in your system keychain, never in the app's files.</div></div>
+        <div><div class="row-label">Models</div><div class="row-desc">The providers Big Brain can answer through. Keys are stored in your system keychain, never in the app's files.</div></div>
         <button class="btn" data-action="ai-add-provider">Add model provider</button>
       </div>
       <div class="ai-providers" aria-label="Model providers"></div>
       <div class="row ai-profile-row">
-        <div><div class="row-label"><label for="app-ai-profile">About you</label></div><div class="row-desc">Who you are and how you like answers. Mark reads this in every chat.</div></div>
+        <div><div class="row-label"><label for="app-ai-profile">About you</label></div><div class="row-desc">Who you are and how you like answers. Big Brain reads this in every chat.</div></div>
         <textarea class="ai-profile" id="app-ai-profile" rows="3" maxlength="2000" spellcheck="true" placeholder="e.g. I'm a backend engineer writing API docs. Keep answers short, use British spelling."></textarea>
       </div>
       <div class="row">
-        <div><div class="row-label">Memory</div><div class="row-desc">Mark saves lasting facts and preferences you mention and uses them in later chats.</div></div>
+        <div><div class="row-label">Memory</div><div class="row-desc">Big Brain saves lasting facts and preferences you mention and uses them in later chats.</div></div>
         <div class="segmented" data-setting="aiMemory">
           <button data-value="on">On</button><button data-value="off">Off</button>
         </div>
       </div>
-      <ul class="ai-memory-list" aria-label="What Mark remembers"></ul>
-      <p class="ai-privacy">When you ask, Mark sends your message, the open document (for a large one, its outline and the parts Mark reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. In an open folder Mark can also search and read its other Markdown files. Chats and memory are stored only on this device.</p>
+      <ul class="ai-memory-list" aria-label="What Big Brain remembers"></ul>
+      <p class="ai-privacy">When you ask, Big Brain sends your message, the open document (for a large one, its outline and the parts Big Brain reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. In an open folder Big Brain can also search and read its other Markdown files. Chats and memory are stored only on this device.</p>
     </div>
     <div class="settings-foot"><button class="btn btn-outline" data-action="settings-reset">Reset to defaults</button></div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.
