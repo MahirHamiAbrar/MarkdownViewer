@@ -123,6 +123,7 @@ const AI_TOOL_LABELS = {
   read_document: "Read document", search_document: "Searched document", list_files: "Listed files",
   search_files: "Searched workspace", read_file: "Read file", remember: "Remembered", forget: "Forgot",
   pdf_inspect: "Inspected PDF", pdf_text: "Read PDF text", pdf_view: "Looked at PDF pages",
+  edit_file: "Edited file", create_file: "Created file",
 };
 const aiEffortName = (value) => AI_EFFORT_INFO[value]?.[0] || value || "";
 
@@ -137,7 +138,7 @@ const store = {
 };
 
 const DEFAULT_SETTINGS = {
-  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiProvider: "", aiModel: "", aiMemory: "on",
+  theme: "system", accent: "blue", fontSize: "13", width: "normal", fontUi: "", fontEditor: "", fontView: "", aiEffort: "high", aiProvider: "", aiModel: "", aiMemory: "on", aiEdits: "ask",
   lineHeight: "normal", align: "left", codeWrap: "scroll", tabSize: "2", autosave: "off", startup: "last",
 };
 const READ_WIDTHS = { narrow: "640px", normal: "760px", wide: "980px", full: "100%" };
@@ -1949,7 +1950,7 @@ const actions = {
   "open-folder": pickFolder,
   "refresh-folder": () => loadTree(),
   "settings-reset": () => {
-    state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiProvider: state.settings.aiProvider, aiModel: state.settings.aiModel, aiMemory: state.settings.aiMemory };
+    state.settings = { ...DEFAULT_SETTINGS, aiEffort: state.settings.aiEffort, aiProvider: state.settings.aiProvider, aiModel: state.settings.aiModel, aiMemory: state.settings.aiMemory, aiEdits: state.settings.aiEdits };
     applySettings();
     for (const input of $$("[data-font]", el.settingsDlg)) input.value = "";
   },
@@ -2478,7 +2479,7 @@ function systemPrompt(chat) {
 
 function aiTools() {
   const files = workspaceFiles();
-  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFiles: files.length > 0, memory: aiMemoryOn(), pdf: state.view === "pdf" || files.some(isPdf), vision: aiVision() });
+  return markTools({ largeDoc: aiDocIsLarge(aiDocument()), hasFiles: files.length > 0, memory: aiMemoryOn(), pdf: state.view === "pdf" || files.some(isPdf), vision: aiVision(), edit: state.settings.aiEdits !== "off" && files.length > 0 });
 }
 
 /** The workspace file a name from the model or an @mention refers to: absolute, display path, or a unique path ending. */
@@ -3091,6 +3092,56 @@ async function runAiToolCall(current, call) {
   return result;
 }
 
+/** Where a file the model wants to create goes: inside a workspace folder, never above it and never hidden. */
+function newWorkspacePath(name) {
+  const want = String(name || "").trim().replace(/^\.[\\/]/, "");
+  const { folders } = state.workspace;
+  if (!want) throw new Error("path is empty.");
+  if (!folders.length) throw new Error("No folder is open, so there is nowhere to create a file.");
+  const parts = want.split(/[\\/]/);
+  if (parts.some((part) => part === ".." || part.startsWith(".") || !part.trim())) throw new Error("The path may not contain '..', empty or hidden (dot) segments.");
+  let path;
+  if (/^([\\/]|[A-Za-z]:)/.test(want)) path = want;
+  else {
+    const named = folders.find((dir) => baseName(dir) === parts[0]);
+    path = folders.length === 1 && !named ? `${folders[0]}${state.sep}${want}` : named && parts.length > 1 ? `${named}${state.sep}${parts.slice(1).join(state.sep)}` : null;
+    if (!path) throw new Error(`Start the path with one of the workspace folders: ${folders.map(baseName).join(", ")}.`);
+  }
+  if (!rootOf(path)) throw new Error("Files can only be created inside a workspace folder.");
+  if (VIEW_RE.test(path)) throw new Error("PDF and HTML files cannot be created.");
+  return path;
+}
+
+/** Shows a proposed change as a diff under the answer and resolves true (Accept) or false (Reject, or Stop). */
+function askAiEdit({ path, before, after, create = false }) {
+  const rows = lineDiff(before, after); // markctx.js
+  const count = (type) => rows.filter((row) => row.type === type).length;
+  const card = document.createElement("section");
+  card.className = "ai-edit";
+  card.setAttribute("aria-label", `${create ? "New file" : "Change to"} ${displayPath(path)}`);
+  card.innerHTML = `<header><span class="ai-edit-path" title="${escapeHtml(path)}">${svg(create ? "plus" : "pencil")}${escapeHtml(displayPath(path))}</span>
+      <span class="ai-edit-stat"><b class="add">+${count("+")}</b> <b class="del">−${count("-")}</b></span></header>
+    <pre class="ai-edit-diff">${rows.map((row) => `<span class="${{ "+": "add", "-": "del", "…": "gap" }[row.type] || ""}">${row.type === "…" ? "⋯" : escapeHtml(`${row.type} ${row.text}`)}\n</span>`).join("")}</pre>
+    <footer><span class="ai-edit-note">${create ? "Big Brain wants to create this file." : "Big Brain wants to make this change."}</span>
+      <button class="btn" data-edit="reject">Reject</button><button class="btn btn-primary" data-edit="accept">Accept</button></footer>`;
+  el.aiMessages.append(card);
+  scrollAiIfPinned(true);
+  $('[data-edit="accept"]', card).focus({ preventScroll: true });
+  return new Promise((resolve) => {
+    const settle = (ok) => {
+      state.ai.pendingEdit = null;
+      $("footer", card).innerHTML = `<span class="ai-edit-note" data-ok="${ok}">${svg(ok ? "check" : "x")}${ok ? "Accepted" : "Rejected"}</span>`;
+      card.classList.add("settled");
+      resolve(ok);
+    };
+    state.ai.pendingEdit = settle;
+    card.addEventListener("click", (e) => {
+      const button = e.target.closest("[data-edit]");
+      if (button && state.ai.pendingEdit === settle) settle(button.dataset.edit === "accept");
+    });
+  });
+}
+
 const isPdf = (path) => /\.pdf$/i.test(path || "");
 /** Whether the chosen model takes images; unknown counts as yes (see `vision` in providers.rs). */
 const aiVision = () => (state.ai.current?.model ?? aiCurrent()?.model)?.vision ?? (state.ai.current?.provider ?? aiCurrent()?.provider)?.vision ?? true;
@@ -3140,6 +3191,33 @@ async function runAiTool(name, args) {
       if (isPdf(path)) throw new Error("That is a PDF, not a text file. Call pdf_inspect on it.");
       const out = numberedLines(await workspaceText(path), args.start_line, args.end_line);
       return { result: `${displayPath(path)}\n${out.text}`, detail: `${displayPath(path)} · lines ${out.from}–${out.to}` };
+    }
+    case "edit_file": {
+      const path = resolveWorkspaceFile(args.path);
+      if (!path) throw new Error("No such file in the workspace. Call list_files for valid paths, or create_file for a new one.");
+      if (VIEW_RE.test(path)) throw new Error("PDF and HTML files are view-only here and cannot be edited.");
+      const before = await workspaceText(path);
+      const after = applyTextEdit(before, args.old_text, args.new_text).text; // markctx.js; throws when old_text is not unique
+      if (!(await askAiEdit({ path, before, after }))) return { result: "The user rejected this change. Nothing was written. Do not retry it unless they ask.", detail: `${displayPath(path)} · rejected` };
+      const tab = state.tabs.find((t) => tabPath(t) === path);
+      if (tab) {
+        // In the editor, as one undoable edit left unsaved: the user reviews and saves it like their own typing.
+        await activateTab(tab.id);
+        const edit = applyTextEdit(state.text, args.old_text, args.new_text); // the buffer may have moved on while the card was up
+        applyEdit(edit.start, edit.end, edit.insert);
+        return { result: `Applied to ${displayPath(path)} in the editor. It is not saved to disk yet; the user saves it.`, detail: `${displayPath(path)} · applied, unsaved` };
+      }
+      await invoke("write_file", { path, contents: applyTextEdit(await invoke("read_file", { path }), args.old_text, args.new_text).text });
+      return { result: `Applied and saved to ${displayPath(path)}.`, detail: `${displayPath(path)} · saved` };
+    }
+    case "create_file": {
+      const path = newWorkspacePath(args.path);
+      const content = String(args.content ?? "");
+      if (workspaceFiles().includes(path) || (await invoke("read_file", { path }).then(() => true, () => false))) throw new Error("That file already exists. Use edit_file to change it.");
+      if (!(await askAiEdit({ path, before: "", after: content, create: true }))) return { result: "The user rejected this file. Nothing was written. Do not retry it unless they ask.", detail: `${displayPath(path)} · rejected` };
+      await invoke("write_file", { path, contents: content });
+      loadTree().catch(() => {});
+      return { result: `Created ${displayPath(path)}.`, detail: `${displayPath(path)} · created` };
     }
     // pdfctx.js: inspect first, then extracted text or page images, whichever the pages call for.
     case "pdf_inspect": {
@@ -3264,6 +3342,7 @@ function failAssistant(message) {
 }
 
 async function stopAi() {
+  state.ai.pendingEdit?.(false); // a change waiting for approval counts as rejected
   if (!state.ai.streaming || !state.ai.requestId) return;
   try {
     await invoke("ai_cancel", { requestId: state.ai.requestId });

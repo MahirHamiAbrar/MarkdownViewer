@@ -349,7 +349,13 @@
         </div>
       </div>
       <ul class="ai-memory-list" aria-label="What Big Brain remembers"></ul>
-      <p class="ai-privacy">When you ask, Big Brain sends your message, the open document (for a large one, its outline and the parts Big Brain reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. In an open folder Big Brain can also search and read its other Markdown files. Chats and memory are stored only on this device.</p>
+      <div class="row">
+        <div><div class="row-label">File changes</div><div class="row-desc">Big Brain can edit and create files in your workspace. Each change is shown as a diff and applied only when you accept it.</div></div>
+        <div class="segmented" data-setting="aiEdits">
+          <button data-value="ask">Ask each time</button><button data-value="off">Off</button>
+        </div>
+      </div>
+      <p class="ai-privacy">When you ask, Big Brain sends your message, the open document (for a large one, its outline and the parts Big Brain reads), your notes above, and saved memories to the model provider you selected. With a local provider such as Ollama, nothing leaves this computer. Big Brain can also search and read the other text files of your workspace (open folders and files, including files you @mention), and pages of its PDFs as text or images. Chats and memory are stored only on this device.</p>
     </div>
     <div class="settings-foot"><button class="btn btn-outline" data-action="settings-reset">Reset to defaults</button></div>
     <!-- Custom list, not <datalist>: GTK draws the native popup and ignores the app theme.

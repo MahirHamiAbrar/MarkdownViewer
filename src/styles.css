@@ -628,6 +628,28 @@ kbd {
 .mention-opt mark { background: none; color: var(--accent-text); font-weight: 600; }
 .mention-name { flex: none; max-width: 70%; overflow: hidden; text-overflow: ellipsis; }
 .mention-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-tertiary); font-size: .88rem; }
+/* a file change Big Brain proposes, waiting for Accept / Reject */
+.ai-edit { margin: 8px 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-card); overflow: hidden; }
+.ai-edit header, .ai-edit footer { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
+.ai-edit header { border-bottom: 1px solid var(--border-subtle); font-size: .88rem; }
+.ai-edit-path { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.ai-edit-path svg { width: 14px; height: 14px; color: var(--text-secondary); }
+.ai-edit-stat { flex: none; font-family: var(--font-mono); font-size: .82rem; }
+.ai-edit-stat b { font-weight: 600; }
+.ai-edit .add { color: var(--success); }
+.ai-edit .del { color: var(--danger); }
+.ai-edit-diff { margin: 0; padding: 6px 0; max-height: 300px; overflow: auto; font-family: var(--font-mono); font-size: .8rem; line-height: 1.5; background: var(--bg-inset); }
+.ai-edit-diff span { display: block; padding: 0 10px; white-space: pre; min-width: max-content; }
+.ai-edit-diff .add { background: color-mix(in srgb, var(--success) 14%, transparent); color: var(--text-primary); }
+.ai-edit-diff .del { background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--text-primary); }
+.ai-edit-diff .gap { color: var(--text-tertiary); }
+.ai-edit footer { border-top: 1px solid var(--border-subtle); }
+.ai-edit footer .btn { height: 26px; padding: 0 10px; font-size: .86rem; }
+.ai-edit-note { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: .84rem; }
+.ai-edit-note svg { width: 14px; height: 14px; }
+.ai-edit-note[data-ok="true"] { color: var(--success); }
+.ai-edit-note[data-ok="false"] { color: var(--text-tertiary); }
+.ai-edit.settled .ai-edit-diff { max-height: 120px; opacity: .75; }
 .ai-attachments { display: flex; flex-wrap: wrap; gap: 4px; justify-content: flex-end; margin-bottom: 4px; }
 .ai-attachment { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 8px 2px 6px; border-radius: 999px; background: var(--bg-field); color: var(--text-secondary); font-size: .85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ai-attachment svg { width: 13px; height: 13px; }
