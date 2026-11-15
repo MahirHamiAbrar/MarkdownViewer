@@ -14,11 +14,16 @@ permissions:
 
 jobs:
   test:
-    # 22.04 (glibc 2.35) matches the release build.
-    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # ubuntu-22.04 (glibc 2.35) matches the release build.
+        os: [ubuntu-22.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: System libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -35,6 +40,7 @@ jobs:
           workspaces: src-tauri
       - run: npm ci
       - name: Frontend checks
+        if: runner.os == 'Linux'
         run: |
           node --check src/main.js
           node src/mdsource.js

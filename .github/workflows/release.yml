@@ -1,25 +1,22 @@
 name: Release
 
-# Push a tag `vX.Y.Z` to build the signed .deb and .AppImage and publish them on the
-# Releases page. The tag must match the app version and have a CHANGELOG.md section.
+# Push a tag `vX.Y.Z` to build Linux (.deb, .AppImage), macOS (.dmg, universal) and Windows
+# (.msi, setup .exe) packages and publish them, signed and checksummed, on the Releases page.
+# The tag must match the app version and have a CHANGELOG.md section.
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write # create the release
-  id-token: write # build provenance
-  attestations: write
+  contents: read
 
 jobs:
-  linux:
-    # 22.04 (glibc 2.35) keeps the packages usable on Ubuntu 22.04+, Debian 12+ and derivatives.
+  check:
     runs-on: ubuntu-22.04
     env:
       TAG: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Check the tag, the version and the changelog
         run: |
           version="${TAG#v}"
@@ -32,8 +29,33 @@ jobs:
           ' CHANGELOG.md | sed -e '/./,$!d' > notes.md
           [ -s notes.md ] || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
           cat notes.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notes
+          path: notes.md
+
+  build:
+    needs: check
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # 22.04 (glibc 2.35) keeps the packages usable on Ubuntu 22.04+, Debian 12+ and derivatives.
+          - os: ubuntu-22.04
+            args: --bundles deb,appimage
+            out: src-tauri/target/release/bundle
+          - os: macos-latest
+            args: --target universal-apple-darwin --bundles dmg
+            out: src-tauri/target/universal-apple-darwin/release/bundle
+          - os: windows-latest
+            args: --bundles msi,nsis
+            out: src-tauri/target/release/bundle
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
 
       - name: Import the signing key
+        if: runner.os == 'Linux'
         env:
           GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
         run: |
@@ -42,6 +64,7 @@ jobs:
           echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')" >> "$GITHUB_ENV"
 
       - name: System libraries
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -51,6 +74,8 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
@@ -58,24 +83,67 @@ jobs:
       - name: Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml
 
-      - name: Build (AppImage signed in place)
+      # SIGN* only matter to the AppImage bundler (signed in place); other platforms ignore them.
+      - name: Build
+        shell: bash
         env:
-          SIGN: "1"
+          SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
           SIGN_KEY: ${{ env.GPG_KEY_ID }}
           APPIMAGETOOL_SIGN_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-          APPIMAGETOOL_FORCE_SIGN: "1"
-        run: npx tauri build --bundles deb,appimage
+          APPIMAGETOOL_FORCE_SIGN: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: npx tauri build ${{ matrix.args }}
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir dist
+          find "${{ matrix.out }}" -maxdepth 2 -type f \
+            \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' -o -name '*.msi' -o -name '*-setup.exe' \) \
+            -exec cp {} dist/ \;
+          ls -l dist
+          [ -n "$(ls dist)" ] || { echo "::error::No packages found under ${{ matrix.out }}"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ runner.os }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write # create the release
+      id-token: write # build provenance
+      attestations: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4 # gh release --verify-tag needs the repository
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: packages-*
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: notes
+
+      - name: Import the signing key
+        env:
+          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
+        run: |
+          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
+          echo "GPG_KEY_ID=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ { print $10; exit }')" >> "$GITHUB_ENV"
 
       - name: Sign and checksum
         env:
           GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
-          mkdir dist
-          cp src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/appimage/*.AppImage dist/
           cd dist
           sign() { gpg --batch --yes --pinentry-mode loopback --passphrase "$GPG_PASSPHRASE" --local-user "$GPG_KEY_ID" --armor --detach-sign "$1"; }
-          for file in *.deb *.AppImage; do sign "$file"; done
-          sha256sum *.deb *.AppImage > SHA256SUMS
+          files=$(ls)
+          for file in $files; do sign "$file"; done
+          sha256sum $files > SHA256SUMS
           sign SHA256SUMS
           ls -l
 
@@ -84,6 +152,9 @@ jobs:
           subject-path: |
             dist/*.deb
             dist/*.AppImage
+            dist/*.dmg
+            dist/*.msi
+            dist/*.exe
 
       - name: Publish
         env:

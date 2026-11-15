@@ -122,7 +122,7 @@ chat, and a **Memory** switch. With memory on, Big Brain saves lasting facts and
 (you get a toast each time) and you can delete any of them in Settings. Both live in
 `~/.markdowneditor/memory.json` (mode 0600) and are sent to the selected provider with your questions.
 
-## Download & install (Linux)
+## Download & install
 
 Download the latest package from the
 [Releases page](https://github.com/MahirHamiAbrar/MarkdownViewer/releases/latest); no build
@@ -130,6 +130,11 @@ required:
 
 - **`MarkdownEditor_<version>_amd64.deb`** — Debian, Ubuntu, and derivatives
 - **`MarkdownEditor_<version>_amd64.AppImage`** — any other distribution with a desktop
+- **`MarkdownEditor_<version>_universal.dmg`** — macOS (Apple silicon and Intel)
+- **`MarkdownEditor_<version>_x64-setup.exe`** or **`_x64_en-US.msi`** — Windows
+
+The macOS and Windows builds are not code-signed yet. On macOS, right-click the app and choose
+**Open** the first time; on Windows, choose **More info → Run anyway** in SmartScreen.
 
 ```sh
 # Debian / Ubuntu: installs the app and pulls in its system dependencies
@@ -141,8 +146,7 @@ chmod +x MarkdownEditor_<version>_amd64.AppImage
 ```
 
 Both come with a desktop entry and Markdown file associations. See
-[From the terminal](#from-the-terminal) for the `markdowneditor` command. Windows and macOS have no
-released binaries yet; see [docs/BUILDING.md](docs/BUILDING.md) to build your own.
+[From the terminal](#from-the-terminal) for the `markdowneditor` command.
 
 ### Verify your download
 

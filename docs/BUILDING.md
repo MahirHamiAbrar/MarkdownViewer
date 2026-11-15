@@ -1,8 +1,8 @@
 # Building and signing
 
-Released binaries are Linux only (`.deb` and `.AppImage`, from
-[GitHub Releases](https://github.com/MahirHamiAbrar/MarkdownViewer/releases)). On Windows and
-macOS, build the app yourself; the steps are below.
+Released binaries for Linux (`.deb`, `.AppImage`), macOS (`.dmg`) and Windows (`.msi`, setup
+`.exe`) are on [GitHub Releases](https://github.com/MahirHamiAbrar/MarkdownViewer/releases). To
+build the app yourself, follow the steps below.
 
 ## Any platform
 
@@ -16,8 +16,7 @@ npm run build
 
 Installers land in `src-tauri/target/release/bundle/`.
 
-> Windows and macOS builds are not part of CI and are tested less than Linux. Please report
-> what breaks.
+> Windows and macOS builds are tested less than Linux. Please report what breaks.
 
 ## Signing your own build
 
@@ -40,7 +39,8 @@ See the Tauri guides for [macOS](https://v2.tauri.app/distribute/sign/macos/),
 
 1. Move the "Unreleased" notes in `CHANGELOG.md` under a new `## [X.Y.Z]` heading.
 2. Set the same version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json`.
-3. Commit, then `git tag vX.Y.Z && git push origin main vX.Y.Z`.
+3. Commit, then `git tag vX.Y.Z` and push `main` and the tag to the GitHub repository. Only a
+   tag push starts the Release workflow; pushing `main` alone runs CI.
 
 The Release workflow refuses to run if the tag, the version and the changelog disagree, or if
 the signing secrets (`GPG_PRIVATE_KEY`, `GPG_PASSPHRASE`) are missing.
