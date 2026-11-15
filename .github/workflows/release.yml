@@ -75,7 +75,7 @@ jobs:
     uses: ./.github/workflows/platform.yml
     with:
       os: macos-latest
-      args: --target universal-apple-darwin --bundles dmg
+      args: --target universal-apple-darwin --bundles app,dmg # app: also makes the updater .app.tar.gz
       out: src-tauri/target/universal-apple-darwin/release/bundle
       version: ${{ needs.version.outputs.version }}
     secrets: inherit
