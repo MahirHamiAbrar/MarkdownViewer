@@ -54,8 +54,33 @@ function continuation(line) {
   return { insert: q[1] };
 }
 
+/**
+ * LaTeX `\( … \)` and `\[ … \]` rewritten as `$…$` / `$$…$$`, which comrak's math extension knows.
+ * Fenced code and code spans are left alone. Used for chat answers only: in documents `\[` and `\(`
+ * are ordinary Markdown escapes (`\[citation needed\]`).
+ */
+function texDelimiters(text) {
+  if (!text.includes("\\(") && !text.includes("\\[")) return text;
+  const inline = (s) => s.replace(/(`+)[\s\S]*?\1|\\\[([\s\S]+?)\\\]|\\\(([\s\S]+?)\\\)/g,
+    (m, code, display, math) => (code ? m : display != null ? `$$${display.trim()}$$` : `$${math.trim()}$`));
+  const out = [];
+  let chunk = [];
+  let fence = null;
+  for (const line of text.split("\n")) {
+    const f = /^\s{0,3}(?:>\s?)*(`{3,}|~{3,})/.exec(line);
+    if (f && (!fence || (f[1][0] === fence[0] && f[1].length >= fence.length))) {
+      if (!fence && chunk.length) { out.push(inline(chunk.join("\n"))); chunk = []; }
+      fence = fence ? null : f[1];
+      out.push(line);
+    } else if (fence) out.push(line);
+    else chunk.push(line);
+  }
+  if (chunk.length) out.push(inline(chunk.join("\n")));
+  return out.join("\n");
+}
+
 if (typeof module !== "undefined") {
-  module.exports = { scanSource, continuation };
+  module.exports = { scanSource, continuation, texDelimiters };
   if (require.main === module) {
     const assert = require("node:assert/strict");
     const src = "---\ntitle: # not a heading\n---\n# One *two*\n\n```sh\n# comment\n- [ ] not a task\n```\n## [Link](x) ##\n- [ ] a\n  1. [x] b\n> - [X] c\n";
@@ -74,6 +99,11 @@ if (typeof module !== "undefined") {
     assert.equal(continuation("plain"), null);
     assert.equal(continuation("**bold** start"), null);
     assert.equal(continuation("   "), null);
+    assert.equal(texDelimiters("by \\( \\sqrt{d_k} \\) and"), "by $\\sqrt{d_k}$ and");
+    assert.equal(texDelimiters("\\[\na \\\\ b\n\\]"), "$$a \\\\ b$$");
+    assert.equal(texDelimiters("`\\(x\\)` and ``a`\\[y\\]``"), "`\\(x\\)` and ``a`\\[y\\]``");
+    assert.equal(texDelimiters("```\n\\(x\\)\n```\n\\(y\\)"), "```\n\\(x\\)\n```\n$y$");
+    assert.equal(texDelimiters("```\n\\(open fence"), "```\n\\(open fence");
     console.log("mdsource ok");
   }
 }
