@@ -981,6 +981,8 @@ function decoratePreview(root) {
     if (/^(https?:|mailto:)/i.test(a.getAttribute("href"))) a.classList.add("external");
   }
   for (const img of $$("img[src]", root)) {
+    img.decoding = "async"; // decode off the main thread; big screenshots otherwise stall scroll/typing
+    img.loading = "lazy";
     const src = img.getAttribute("src");
     if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(src) && !src.startsWith("file:")) continue;
     try {

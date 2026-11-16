@@ -768,7 +768,7 @@ body:has(.update-card:not([hidden])) .toasts { bottom: calc(40px + var(--update-
 .md blockquote::before { content: ""; position: absolute; left: 0; top: .2em; bottom: .2em; width: 3px; border-radius: 2px; background: color-mix(in srgb, var(--accent) 55%, transparent); }
 .md blockquote > :last-child { margin-bottom: 0; }
 .md hr { border: 0; height: 1px; background: var(--border-default); margin: 2.4em 0; }
-.md img { max-width: 100%; border-radius: var(--radius-md); }
+.md img { max-width: 100%; height: auto; border-radius: var(--radius-md); content-visibility: auto; contain-intrinsic-size: auto 400px; }
 .md p > img:only-child { display: block; margin: 1.4em auto; }
 .md :not(pre) > code {
   font-family: var(--font-mono); font-size: .86em; padding: .14em .4em; border-radius: var(--radius-xs);
