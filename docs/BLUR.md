@@ -31,12 +31,21 @@ off, hardware acceleration is "never" (see `webkit://gpu`) and the blur is silen
 popups become see-through with sharp text behind them. Plain `filter: blur()` still works because it
 does not need compositing.
 
-The renderer is off on most Linux installs of this app:
+**Settings → GPU acceleration** (Auto / On / Off, Linux only) picks the renderer at launch;
+`src-tauri/src/gpu.rs` reads it from `~/.markdowneditor/gpu` and a change applies after a restart.
+Auto turns it on everywhere except the NVIDIA proprietary driver:
 
-- **NVIDIA proprietary driver:** WebKitGTK disables the DMA-BUF renderer on its own. Forcing it with
-  `WEBKIT_FORCE_DMABUF_RENDERER=1` enabled compositing but produced a blank window in testing (X11).
-- **Intel / AMD (Mesa):** the renderer works, but `src-tauri/src/main.rs` sets
-  `WEBKIT_DISABLE_DMABUF_RENDERER=1` because the renderer adds noticeable launch time.
+- **NVIDIA proprietary driver:** WebKitGTK disables the DMA-BUF renderer on its own, so "on" also sets
+  `WEBKIT_FORCE_DMABUF_RENDERER=1`. On X11 that produced a blank window. On Wayland it draws, and dialogs
+  scroll smoothly, but long documents with images scroll worse than on the CPU (RTX 3060, driver 580).
+- **Intel / AMD (Mesa):** the renderer works without forcing. "Off" sets
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`, which launches faster but draws on the CPU.
+
+A WebKit variable already set in the environment wins over the setting.
+
+Don't hide the window at start and show it later to cover the GPU renderer's layer-by-layer first
+frame: on Linux, Tauri's `show()` is GTK's `show_all()`, and calling it once the webview exists made
+preview scrolling choppy (measured with release builds, GPU on and off).
 
 The webview still reports `CSS.supports("backdrop-filter", ...)` as true, so support can't be
 detected from JavaScript; the default is chosen by platform instead.

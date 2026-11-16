@@ -325,8 +325,14 @@
         <label class="search-field font-field"><input class="font-input" data-font="fontEditor" placeholder="Default" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="app-font-menu" spellcheck="false" aria-label="Editor font" /></label>
       </div>
       <div class="row">
-        <div><div class="row-label">Turn on Blur Effect</div><div class="row-desc">Frosted, see-through popups and menus. Off by default on Linux, where most setups can't draw the blur.</div></div>
+        <div><div class="row-label">Turn on Blur Effect</div><div class="row-desc">Frosted, see-through popups and menus. Off by default on Linux, where the blur needs GPU acceleration on.</div></div>
         <button class="switch" role="switch" data-setting-toggle="blur" aria-checked="true" aria-label="Turn on blur effect"></button>
+      </div>
+      <div class="row" data-gpu-row hidden>
+        <div><div class="row-label">GPU acceleration</div><div class="row-desc" data-gpu-desc>Smoother scrolling and blur, drawn on the graphics card. Applies after a restart.</div></div>
+        <div class="segmented" data-gpu>
+          <button data-value="auto">Auto</button><button data-value="on">On</button><button data-value="off">Off</button>
+        </div>
       </div>
     </div>
     <div class="card">

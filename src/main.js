@@ -315,6 +315,35 @@ el.settingsDlg.addEventListener("click", (e) => {
   }
   if (sw || seg) applySettings();
 });
+// GPU acceleration (Linux): read by the backend at launch, so a change needs a restart.
+const gpuRow = $("[data-gpu-row]");
+let gpu = null; // { supported, mode, active } for this launch, plus savedMode once changed
+async function refreshGpu() {
+  gpu ||= await invoke("gpu_status").catch(() => null);
+  if (!gpu?.supported) return;
+  gpuRow.hidden = false;
+  const mode = gpu.savedMode || gpu.mode;
+  for (const b of $$("[data-gpu] button")) b.setAttribute("aria-checked", String(b.dataset.value === mode));
+  $("[data-gpu-desc]").textContent = `Smoother scrolling and blur, drawn on the graphics card. ${gpu.active ? "On" : "Off"} now${mode === gpu.mode ? "" : ", restart to apply"}. Auto turns it on except on NVIDIA cards, where it scrolls worse.`;
+}
+$("[data-gpu]").addEventListener("click", async (e) => {
+  const b = e.target.closest("button");
+  if (!b || !gpu) return;
+  try {
+    await invoke("gpu_set", { mode: b.dataset.value });
+  } catch (err) {
+    return toast(`Couldn't save the GPU setting: ${err}`, "error");
+  }
+  gpu.savedMode = b.dataset.value;
+  refreshGpu();
+  if (b.dataset.value !== gpu.mode) {
+    toast("GPU acceleration changes after a restart.", "success", {
+      label: "Restart",
+      run: async () => { if (await settleAllUnsaved()) window.__TAURI__.process.relaunch(); },
+    });
+  }
+});
+
 function setFont(input, name) {
   state.settings[input.dataset.font] = name.trim();
   applySettings();
@@ -330,6 +359,7 @@ function openSettings() {
     renderAiMemory();
   });
   refreshSearchStatus();
+  refreshGpu();
   el.settingsDlg.showModal();
   if (fontsLoaded) return;
   fontsLoaded = true;
@@ -2532,11 +2562,16 @@ const renderUpdateSoon = () => { updateFrame ||= requestAnimationFrame(() => { u
 
 function showUpdateCard() { upd.cardHidden = false; renderUpdate(); }
 
-async function restartForUpdate() {
-  // Unsaved work: same questions as closing the window. Drafts cover the other windows.
+/** Before a restart: the same questions as closing the window. Drafts cover the other windows. */
+async function settleAllUnsaved() {
   for (const tab of state.tabs.filter(tabDirty)) {
-    if (!(await activateTab(tab.id)) || !(await settleUnsaved())) return;
+    if (!(await activateTab(tab.id)) || !(await settleUnsaved())) return false;
   }
+  return true;
+}
+
+async function restartForUpdate() {
+  if (!(await settleAllUnsaved())) return;
   try {
     if (IS_WINDOWS) await upd.update.install(); // runs the installer, which quits and relaunches the app
     else await window.__TAURI__.process.relaunch();

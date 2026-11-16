@@ -16,6 +16,7 @@ mod anthropic;
 mod chats;
 mod cli;
 mod fsutil;
+mod gpu;
 mod highlights;
 mod providers;
 mod web_search;
@@ -306,6 +307,7 @@ fn list_fonts() -> Vec<String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    gpu::apply_env(); // before any thread or webview starts
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.iter().any(|a| a == "-h" || a == "--help") {
         return println!("{}", cli::HELP);
@@ -367,6 +369,8 @@ pub fn run() {
             read_bytes,
             export_pdf,
             new_window,
+            gpu::gpu_status,
+            gpu::gpu_set,
             workspace::list_workspace,
             workspace::search_files,
             workspace::watch_paths,
