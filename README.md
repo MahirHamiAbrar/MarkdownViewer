@@ -113,6 +113,8 @@ Signature verification, manual install steps and building from source:
 - Find & replace with match case, whole word, and regular expressions
 - Smart editing: Enter continues lists and quotes, Tab indents, typing `*`, `_`, `` ` `` or a
   bracket wraps the selection, <kbd>Ctrl</kbd> <kbd>B</kbd> / <kbd>I</kbd> / <kbd>K</kbd> for bold, italic and links
+- Syntax-colored editor, auto-closed brackets and code fences, and suggestions as you type:
+  `/` blocks, code languages, files and headings to link to, and words from the document
 - Tick a task-list checkbox in the preview and the source updates
 - Word count, cursor position, and undo/redo history
 

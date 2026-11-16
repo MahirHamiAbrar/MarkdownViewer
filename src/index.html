@@ -136,7 +136,8 @@
         <section class="doc" data-mode="read" hidden>
           <div class="pane editor-pane">
             <div class="editor-hl" aria-hidden="true"></div>
-            <textarea class="editor" spellcheck="false" aria-label="Markdown source"></textarea>
+            <div class="editor-syn" aria-hidden="true"></div>
+            <textarea class="editor" spellcheck="false" aria-label="Markdown source" aria-autocomplete="list" aria-expanded="false" aria-controls="app-suggest-menu"></textarea>
           </div>
           <div class="pane preview-pane">
             <article class="md"></article>
@@ -245,6 +246,7 @@
     </div>
 
     <div class="mention-menu popover" id="app-mention-menu" role="listbox" aria-label="Files to mention" hidden></div>
+    <div class="mention-menu suggest-menu popover" id="app-suggest-menu" role="listbox" aria-label="Suggestions" hidden></div>
 
     <div class="drop-overlay" hidden>
       <div><svg><use href="#i-drop"/></svg><p>Drop a Markdown file to open it</p></div>
@@ -380,6 +382,10 @@
         <div class="segmented" data-setting="autosave">
           <button data-value="off">Off</button><button data-value="on">On</button>
         </div>
+      </div>
+      <div class="row">
+        <div><div class="row-label">Suggestions</div><div class="row-desc">While you type, offer words from the document, files and headings to link to, code languages, and blocks after a <kbd>/</kbd> at the start of a line.</div></div>
+        <button class="switch" role="switch" data-setting-toggle="suggest" aria-checked="true" aria-label="Show suggestions while typing"></button>
       </div>
       <div class="row">
         <div><div class="row-label">On startup</div><div class="row-desc">What to show when the app opens without a file.</div></div>

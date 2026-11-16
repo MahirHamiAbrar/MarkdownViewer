@@ -8,6 +8,16 @@ All notable changes to MarkdownEditor are listed here. The format follows
 
 ### Added
 
+- Syntax colors in the editor (Edit and Split modes): headings, emphasis, links, code, math,
+  lists, quotes, tables, HTML and front matter, in the colors of the current theme.
+- Suggestions while typing: `/` at the start of a line inserts a block (heading, table, code
+  block, math, callout, Mermaid diagram…), an opening fence suggests a language, `](` suggests
+  workspace files (images after `![`), `](#` suggests headings, and three letters suggest longer
+  words from the document. Enter or Tab inserts (only Tab for words). Settings → Editor and files
+  → Suggestions turns them off.
+- Auto-close: typing `(`, `[`, `{` or `` ` `` adds the closer, typing the closer steps over it,
+  and Backspace removes an empty pair. Enter after an opening code fence or `$$` adds the closing one.
+
 - Click an image or a Mermaid diagram to expand it: drag to move, scroll or pinch to zoom,
   double-click to zoom in, `0` fits, `1` shows actual size, Esc closes.
 - Automatic updates: the app checks GitHub Releases, downloads and installs new versions in the
