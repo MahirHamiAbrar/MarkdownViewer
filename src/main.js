@@ -52,6 +52,8 @@ const el = {
   replaceRow: $(".replace-row"),
   findToggle: $(".find-toggle"),
   editorHl: $(".editor-hl"),
+  editorSyn: $(".editor-syn"),
+  suggestMenu: $(".suggest-menu"),
   menu: $(".ctx-menu"),
   status: $(".statusbar"),
   stPath: $(".st-path"),
@@ -1307,6 +1309,8 @@ function setMode(mode) {
   // Keep reading position when switching panes.
   setScrollRatio(el.editor, ratio);
   setScrollRatio(el.previewPane, ratio);
+  syncEditorLayers();
+  hideSuggest();
   if (mode !== "read") el.editor.focus({ preventScroll: true });
   if (mode !== "edit" && state.path) renderPreview(); // catch up on edits made in edit mode
   updatePos();
@@ -1365,6 +1369,7 @@ const renderSoon = debounce(renderPreview, 120); // bursts of typing coalesce in
 const autosaveSoon = debounce(() => { if (state.settings.autosave === "on" && state.path && isDirty()) save(); }, 1500);
 const outlineSoon = debounce(() => { if (outlineKeyOf(scanSource(state.text).headings) !== outlineKey) renderSidebar(); }, 400);
 function editorChanged() {
+  paintSyntax();
   state.text = el.editor.value;
   driver = el.editor;
   if (isDirty() !== shownDirty) updateChrome();
@@ -1375,10 +1380,237 @@ function editorChanged() {
   draftSoon();
   if (!el.findbar.hidden) findSoon();
 }
-el.editor.addEventListener("input", () => { if (!restoring) recordEdit(); editorChanged(); });
+el.editor.addEventListener("input", (e) => {
+  if (!restoring) recordEdit();
+  editorChanged();
+  if (!restoring && !choosing) updateSuggest(e.inputType);
+});
 el.editor.addEventListener("keyup", updatePos);
-el.editor.addEventListener("scroll", () => { el.editorHl.scrollTop = el.editor.scrollTop; });
+el.editor.addEventListener("scroll", () => {
+  syncEditorLayers();
+  if (!el.suggestMenu.hidden) placeSuggest();
+});
 el.editor.addEventListener("click", updatePos);
+el.editor.addEventListener("pointerdown", () => hideSuggest());
+el.editor.addEventListener("blur", () => hideSuggest());
+
+// ---------- syntax colors ----------
+// The textarea's own text is transparent: .editor-syn behind it shows the same text, colored, one
+// div per line (mdsource.js colors a line). A change re-colors only the lines that differ, plus any
+// lines below whose block state flipped (typing an opening fence turns the rest of the file to code).
+// ponytail: a big paste or fence flip in a huge file re-colors every line once; virtualize if that lags.
+const syn = { lines: [], enter: [], nodes: [] }; // per line: its text, the block state before it, its div
+function paintSyntax() {
+  const lines = el.editor.value.split("\n");
+  const old = syn.lines;
+  const max = Math.min(old.length, lines.length);
+  let a = 0;
+  while (a < max && old[a] === lines[a]) a++;
+  let b = 0;
+  while (b < max - a && old[old.length - 1 - b] === lines[lines.length - 1 - b]) b++;
+  const fresh = lines.slice(a, lines.length - b).map(() => document.createElement("div"));
+  for (const n of syn.nodes.slice(a, old.length - b)) n.remove();
+  const frag = document.createDocumentFragment();
+  for (const n of fresh) frag.appendChild(n);
+  el.editorSyn.insertBefore(frag, syn.nodes[old.length - b] || null);
+  // concat, not splice(...spread): a whole file's lines overflow the argument limit
+  syn.nodes = syn.nodes.slice(0, a).concat(fresh, syn.nodes.slice(old.length - b));
+  syn.enter = syn.enter.slice(0, a).concat(new Array(fresh.length).fill(null), syn.enter.slice(old.length - b));
+  syn.lines = lines;
+  let st = a ? nextState(lines[a - 1], syn.enter[a - 1], a === 1) : "";
+  for (let i = a; i < lines.length; i++) {
+    if (i > 0 && i >= a + fresh.length && syn.enter[i] === st) break; // an unchanged line, entered as before: so is the rest
+    syn.enter[i] = st;
+    const { html, cls } = highlightLine(lines[i], st, i === 0);
+    syn.nodes[i].className = cls;
+    syn.nodes[i].innerHTML = html || "\u200b"; // an empty line still needs its height
+    st = nextState(lines[i], st, i === 0);
+  }
+  syncEditorLayers();
+}
+// Code that assigns .value directly (opening a file, switching tabs) repaints too, not only typing.
+const editorValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value");
+Object.defineProperty(el.editor, "value", {
+  get() { return editorValue.get.call(this); },
+  set(v) { editorValue.set.call(this, v); paintSyntax(); },
+});
+function syncEditorLayers() {
+  el.editorHl.scrollTop = el.editorSyn.scrollTop = el.editor.scrollTop;
+}
+
+// ---------- suggestions ----------
+// While typing: "/" at a line start offers blocks, an opening fence offers languages, "](" offers files
+// and "](#" headings, and three letters offer longer words of the document. Enter or Tab picks, except
+// for words, which only Tab picks, so Enter at the end of a sentence still starts a new line.
+const BLOCKS = [
+  ["Heading 1", "# ", "h1 title"], ["Heading 2", "## ", "h2"], ["Heading 3", "### ", "h3"],
+  ["Bulleted list", "- ", "ul unordered"], ["Numbered list", "1. ", "ol ordered"], ["Task list", "- [ ] ", "todo checkbox"],
+  ["Quote", "> ", "blockquote"], ["Code block", "```‸\n\n```", "fence snippet"], ["Math block", "$$\n‸\n$$", "latex katex equation"],
+  ["Table", "| ‸Column‸ | Column |\n| --- | --- |\n| Cell | Cell |", "grid"], ["Link", "[‸text‸](url)", "url hyperlink"],
+  ["Image", "![‸alt text‸](path)", "picture"], ["Divider", "---\n", "hr rule separator"],
+  ["Mermaid diagram", "```mermaid\n‸graph TD\n  A --> B‸\n```", "flowchart chart"],
+  ["Note", "> [!NOTE]\n> ‸", "callout alert info"], ["Tip", "> [!TIP]\n> ‸", "callout alert"],
+  ["Important", "> [!IMPORTANT]\n> ‸", "callout alert"], ["Warning", "> [!WARNING]\n> ‸", "callout alert"],
+  ["Caution", "> [!CAUTION]\n> ‸", "callout alert danger"], ["Footnote", "[^‸1‸]\n\n[^1]: ", "reference note"],
+];
+const LANGS = ["bash", "c", "cpp", "csharp", "css", "diff", "dockerfile", "go", "html", "java", "javascript", "json", "jsx", "kotlin", "latex", "lua", "makefile", "markdown", "math", "mermaid", "php", "powershell", "python", "ruby", "rust", "scss", "shell", "sql", "swift", "text", "toml", "tsx", "typescript", "xml", "yaml", "zig"];
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|avif|bmp)$/i;
+const sug = { items: [], active: 0, from: 0, kind: "" };
+let choosing = false; // a pick is typing its text: that input must not reopen the list
+let docWords = { at: 0, tab: null, list: [] };
+
+/** Words of four or more letters in the document, most used first. Rebuilt at most every 2 s while typing. */
+function wordsOfDoc(skipFrom, skipTo) {
+  if (Date.now() - docWords.at > 2000 || docWords.tab !== state.tab) {
+    const counts = new Map();
+    const text = state.text.slice(0, skipFrom) + " " + state.text.slice(skipTo); // not the half-typed word itself
+    for (const w of text.match(/[\p{L}\p{N}_]{4,}/gu) || []) counts.set(w, (counts.get(w) || 0) + 1);
+    docWords = { at: Date.now(), tab: state.tab, list: [...counts].sort((x, y) => y[1] - x[1]).map(([w]) => w) };
+  }
+  return docWords.list;
+}
+
+/** Path from the open file's folder to `file`, with "/" separators. */
+function linkPath(file) {
+  const from = dirName(state.path).split(/[\\/]/);
+  const to = file.split(/[\\/]/);
+  let i = 0;
+  while (i < from.length && i < to.length - 1 && from[i] === to[i]) i++;
+  return Array(from.length - i).fill("..").concat(to.slice(i)).join("/");
+}
+
+function suggestItems(ctx) {
+  const q = ctx.query.toLowerCase();
+  const rank = (list, text) => list
+    .map((item) => ({ item, s: fuzzyScore(text(item).toLowerCase(), q) }))
+    .filter((x) => x.s >= 0)
+    .sort((x, y) => y.s - x.s)
+    .map((x) => x.item);
+  switch (ctx.kind) {
+    case "block":
+      return rank(BLOCKS, ([label, , keys]) => `${label} ${keys}`).map(([label, text]) => ({ label, detail: text.split("\n")[0].replace(/‸/g, ""), text }));
+    case "lang":
+      return rank(LANGS.filter((l) => l !== q), (l) => l).map((l) => ({ label: l, text: l }));
+    case "anchor": {
+      const seen = new Map();
+      const heads = scanSource(state.text).headings.map((h) => { // comrak de-duplicates repeated ids with -1, -2, …
+        const base = slugify(h.text);
+        const n = seen.get(base) || 0;
+        seen.set(base, n + 1);
+        return { label: h.text, detail: "#", text: n ? `${base}-${n}` : base };
+      });
+      return rank(heads, (h) => `${h.label} ${h.text}`).map((h) => ({ ...h, detail: `#${h.text}` }));
+    }
+    case "file":
+    case "image": {
+      if (!state.path) return [];
+      const files = workspaceFiles().filter((f) => f !== state.path && (ctx.kind === "file" || IMAGE_EXT.test(f))).map((f) => {
+        const path = linkPath(f);
+        const cut = path.lastIndexOf("/") + 1;
+        return { label: path.slice(cut), detail: path.slice(0, cut), text: path.replace(/%/g, "%25").replace(/ /g, "%20") };
+      });
+      return rank(files, (f) => f.detail + f.label).slice(0, 50);
+    }
+    case "word":
+      return wordsOfDoc(ctx.at - ctx.query.length, ctx.at)
+        .filter((w) => w.length > q.length && w.toLowerCase().startsWith(q))
+        .slice(0, 8)
+        .map((w) => ({ label: w, text: ctx.query + w.slice(q.length) })); // keeps the case typed so far
+  }
+  return [];
+}
+
+function hideSuggest() {
+  el.suggestMenu.hidden = true;
+  el.editor.setAttribute("aria-expanded", "false");
+  el.editor.removeAttribute("aria-activedescendant");
+}
+
+function updateSuggest(inputType) {
+  if (state.settings.suggest === false || state.mode === "read") return hideSuggest();
+  // Typing opens the list; deleting only narrows an open one; anything else (paste, undo) closes it.
+  if (inputType !== "insertText" && !(inputType.startsWith("delete") && !el.suggestMenu.hidden)) return hideSuggest();
+  const v = el.editor.value;
+  const at = el.editor.selectionStart;
+  if (at !== el.editor.selectionEnd) return hideSuggest();
+  let line = 0;
+  for (let i = v.indexOf("\n"); i !== -1 && i < at; i = v.indexOf("\n", i + 1)) line++;
+  const ls = at ? v.lastIndexOf("\n", at - 1) + 1 : 0;
+  const le = v.indexOf("\n", at);
+  const ctx = suggestContext(v.slice(ls, at), v.slice(at, le < 0 ? v.length : le)); // mdsource.js
+  // In fenced code and math only words make sense.
+  if (!ctx || (syn.enter[line] && ctx.kind !== "word")) return hideSuggest();
+  ctx.at = at;
+  const items = suggestItems(ctx);
+  if (!items.length) return hideSuggest();
+  Object.assign(sug, { items, active: 0, from: ls + ctx.from, kind: ctx.kind, line, col: ctx.from });
+  const hint = ctx.kind === "word" ? "<kbd>Tab</kbd> to complete" : "<kbd>Enter</kbd> to insert";
+  el.suggestMenu.innerHTML = items.map((item, i) =>
+    `<div class="mention-opt" role="option" id="app-suggest-opt-${i}" data-i="${i}" aria-selected="false">
+      <span class="mention-name">${highlight(item.label, ctx.query)}</span>${item.detail ? `<span class="mention-dir">${escapeHtml(item.detail)}</span>` : ""}</div>`).join("")
+    + `<div class="suggest-hint">${hint}</div>`;
+  el.suggestMenu.hidden = false;
+  el.editor.setAttribute("aria-expanded", "true");
+  placeSuggest();
+  setActiveSuggest(0);
+}
+
+/** Puts the list under the start of the text it completes (above it near the window's bottom edge). */
+function placeSuggest() {
+  const node = syn.nodes[sug.line];
+  if (!node) return hideSuggest();
+  // Find the character before the column in the colored line: the textarea itself has no API for caret positions.
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  let col = sug.col;
+  let t;
+  while ((t = walker.nextNode()) && col > t.length) col -= t.length;
+  if (!t) return hideSuggest();
+  const range = document.createRange();
+  range.setStart(t, Math.max(0, col - 1));
+  range.setEnd(t, Math.max(1, col));
+  const rects = range.getClientRects();
+  const r = rects[rects.length - 1];
+  const box = el.editor.getBoundingClientRect();
+  if (!r || r.bottom < box.top || r.top > box.bottom) return hideSuggest(); // scrolled out of view
+  const menu = el.suggestMenu;
+  const left = Math.min(col ? r.right : r.left, window.innerWidth - menu.offsetWidth - 8);
+  const below = r.bottom + 4 + menu.offsetHeight < window.innerHeight - 8;
+  Object.assign(menu.style, { left: `${Math.max(8, left)}px`, top: `${below ? r.bottom + 4 : r.top - 4 - menu.offsetHeight}px` });
+}
+
+function setActiveSuggest(i) {
+  const rows = $$(".mention-opt", el.suggestMenu);
+  sug.active = (i + rows.length) % rows.length;
+  rows.forEach((row, j) => row.setAttribute("aria-selected", String(j === sug.active)));
+  rows[sug.active].scrollIntoView({ block: "nearest" });
+  el.editor.setAttribute("aria-activedescendant", rows[sug.active].id);
+}
+
+/** Types the pick over what it completes. "‸" in its text marks where the caret goes; two mark a selection. */
+function chooseSuggest(i) {
+  const item = sug.items[i];
+  if (!item) return;
+  const at = el.editor.selectionStart;
+  const v = el.editor.value;
+  const prefix = v.slice(v.lastIndexOf("\n", sug.from - 1) + 1, sug.from); // a block typed in a quote or list stays in it
+  const parts = item.text.replace(/\n/g, `\n${prefix}`).split("‸");
+  hideSuggest();
+  choosing = true;
+  try {
+    editRange(sug.from, at, parts.join(""));
+  } finally {
+    choosing = false;
+  }
+  const s = sug.from + parts[0].length;
+  el.editor.setSelectionRange(s, parts.length > 2 ? s + parts[1].length : s);
+  updatePos();
+}
+
+el.suggestMenu.addEventListener("mousedown", (e) => {
+  e.preventDefault(); // keep focus in the editor
+  const opt = e.target.closest(".mention-opt");
+  if (opt) chooseSuggest(Number(opt.dataset.i));
+});
 // Typing one of these over a selection wraps it instead of replacing it.
 const WRAP_PAIRS = { "*": "*", "_": "_", "`": "`", "~": "~", "(": ")", "[": "]", "{": "}", '"': '"' };
 
@@ -1415,22 +1647,63 @@ function indentLines(out) {
   else el.editor.setSelectionRange(ls, ls + next.length);
 }
 
+// Typing an opener puts its closer after the caret; typing that closer then steps over it.
+// ponytail: steps over any matching closer, not only one it put there; track inserted ones if that bites.
+const AUTO_PAIRS = { "(": ")", "[": "]", "{": "}", "`": "`" };
+
+/** Keys for the open suggestion list. True when the key was used up. */
+function suggestKey(e) {
+  const plain = !e.ctrlKey && !e.altKey && !e.metaKey;
+  if ((e.key === "ArrowDown" || e.key === "ArrowUp") && plain) {
+    e.preventDefault();
+    setActiveSuggest(sug.active + (e.key === "ArrowDown" ? 1 : -1));
+  } else if (plain && ((e.key === "Tab" && !e.shiftKey) || (e.key === "Enter" && sug.kind !== "word"))) {
+    e.preventDefault();
+    chooseSuggest(sug.active);
+  } else if (e.key === "Escape") {
+    e.preventDefault();
+    e.stopPropagation();
+    hideSuggest();
+  } else {
+    if (e.key.length > 1 && !/^(Shift|Control|Alt|Meta|Backspace|Delete|Dead|Process)$/.test(e.key)) hideSuggest(); // the caret moves away
+    return false;
+  }
+  return true;
+}
+
 el.editor.addEventListener("keydown", (e) => {
+  if (!el.suggestMenu.hidden && !e.isComposing && suggestKey(e)) return;
   const mod = (e.ctrlKey || e.metaKey) && !e.altKey;
   const plain = !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing;
   const k = e.key.toLowerCase();
   const s = el.editor.selectionStart;
   const end = el.editor.selectionEnd;
-  if (e.key === "Tab" && plain) {
+  const v = el.editor.value;
+  if (plain && s === end && /^[)\]}`]$/.test(e.key) && v[s] === e.key) {
+    e.preventDefault(); // step over the closer
+    el.editor.setSelectionRange(s + 1, s + 1);
+  } else if (plain && s === end && AUTO_PAIRS[e.key] && /^[\s)\]}.,;:!?]?$/.test(v[s] ?? "") && !(e.key === "`" && /[`\p{L}\p{N}]/u.test(v[s - 1] ?? ""))) {
+    e.preventDefault(); // a backtick after a backtick or a letter is a fence or a literal, not a new pair
+    document.execCommand("insertText", false, e.key + AUTO_PAIRS[e.key]);
+    el.editor.setSelectionRange(s + 1, s + 1);
+  } else if (e.key === "Backspace" && plain && s === end && s > 0 && AUTO_PAIRS[v[s - 1]] && v[s] === AUTO_PAIRS[v[s - 1]]) {
+    e.preventDefault(); // an empty pair goes as one
+    editRange(s - 1, s + 1, "");
+  } else if (e.key === "Tab" && plain) {
     e.preventDefault();
     if (e.shiftKey || el.editor.value.slice(s, end).includes("\n")) indentLines(e.shiftKey);
     else document.execCommand("insertText", false, "  ");
   } else if (e.key === "Enter" && plain && !e.shiftKey && s === end) {
-    // Continue lists, task lists, quotes, and indentation; Enter on an empty item ends the list.
-    const v = el.editor.value;
+    // Close a code fence or $$ block just opened; continue lists, task lists, quotes, and indentation;
+    // Enter on an empty item ends the list.
     const ls = s ? v.lastIndexOf("\n", s - 1) + 1 : 0;
-    const c = continuation(v.slice(ls, s)); // mdsource.js
-    if (c?.insert) { e.preventDefault(); document.execCommand("insertText", false, "\n" + c.insert); }
+    const block = (s === v.length || v[s] === "\n") ? closeBlock(v, ls, s) : null; // mdsource.js
+    const c = continuation(v.slice(ls, s));
+    if (block) {
+      e.preventDefault();
+      document.execCommand("insertText", false, `\n${block.indent}\n${block.close}`);
+      el.editor.setSelectionRange(s + 1 + block.indent.length, s + 1 + block.indent.length);
+    } else if (c?.insert) { e.preventDefault(); document.execCommand("insertText", false, "\n" + c.insert); }
     else if (c?.clear && (s === v.length || v[s] === "\n")) { e.preventDefault(); editRange(ls, s, ""); }
   } else if (plain && s !== end && WRAP_PAIRS[e.key]) {
     e.preventDefault();

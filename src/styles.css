@@ -468,19 +468,38 @@ kbd {
 .doc[data-view] .editor-pane, .doc[data-view] .preview-pane, .doc:not([data-view]) .viewer-pane { display: none; }
 .viewer-pane { display: flex; overflow: hidden; }
 .viewer { flex: 1; border: 0; background: #fff; }
-/* Find highlights sit behind the textarea and must lay text out exactly like it. */
-.editor, .editor-hl {
+/* Find highlights and syntax colors sit behind the textarea and must lay text out exactly like it:
+   so no bold or italic in the colors, and no ligatures or kerning, which colored spans would break up. */
+.editor, .editor-hl, .editor-syn {
   box-sizing: border-box; padding: 32px max(24px, calc((100% - var(--read-w)) / 2));
   font: 400 1.05rem/1.7 var(--font-editor); tab-size: var(--editor-tab, 2); text-rendering: optimizeSpeed;
+  font-variant-ligatures: none; font-kerning: none;
   white-space: pre-wrap; overflow-wrap: break-word; overflow-y: auto;
 }
-.doc[data-mode="split"] .editor, .doc[data-mode="split"] .editor-hl { padding: 32px 28px; }
-.editor-hl { position: absolute; inset: 0; color: transparent; pointer-events: none; overflow-x: hidden; }
+.doc[data-mode="split"] :is(.editor, .editor-hl, .editor-syn) { padding: 32px 28px; }
+.editor-hl, .editor-syn { position: absolute; inset: 0; pointer-events: none; overflow-x: hidden; }
+.editor-hl { color: transparent; }
+.editor-syn { color: var(--text-primary); }
+.editor-syn .md-p { color: var(--syn-punct); }
+.editor-syn .md-h { color: var(--syn-heading); }
+.editor-syn .md-li { color: var(--syn-keyword); }
+.editor-syn .md-strong { color: var(--syn-number); }
+.editor-syn .md-em { color: var(--syn-function); }
+.editor-syn .md-del { color: var(--syn-comment); text-decoration: line-through; }
+.editor-syn .md-code { color: var(--syn-string); background: color-mix(in srgb, var(--text-primary) 6%, transparent); border-radius: 3px; }
+.editor-syn .md-link { color: var(--syn-type); }
+.editor-syn .md-url { color: var(--syn-comment); }
+.editor-syn .md-html { color: var(--syn-tag); }
+.editor-syn .md-math { color: var(--syn-attr); }
+.editor-syn .md-lang, .editor-syn .md-key { color: var(--syn-attr); }
+.editor-syn .md-cb { background: color-mix(in srgb, var(--text-primary) 4%, transparent); }
+.editor-syn .md-fm { color: var(--syn-comment); }
 .editor-hl mark { color: transparent; background: color-mix(in srgb, var(--accent) 26%, transparent); border-radius: 3px; }
 .editor-hl mark.current { background: color-mix(in srgb, var(--accent) 55%, transparent); }
 .editor {
   position: relative; z-index: 1; flex: 1; border: 0; outline: 0; resize: none;
-  background: transparent; color: var(--text-primary); /* body's optimizeLegibility makes every keystroke relayout slow on long files */
+  background: transparent; color: transparent; caret-color: var(--text-primary); /* .editor-syn shows the text */
+  /* body's optimizeLegibility makes every keystroke relayout slow on long files */
   user-select: text; -webkit-user-select: text; cursor: text;
 }
 .preview-pane { scroll-behavior: auto; }
@@ -629,6 +648,10 @@ kbd {
 .mention-opt mark { background: none; color: var(--accent-text); font-weight: 600; }
 .mention-name { flex: none; max-width: 70%; overflow: hidden; text-overflow: ellipsis; }
 .mention-dir { min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--text-tertiary); font-size: .88rem; }
+/* Editor suggestions reuse the @mention rows. */
+.suggest-menu { min-width: 180px; max-width: 420px; }
+.suggest-menu .mention-name { max-width: none; flex: 1; }
+.suggest-hint { padding: 5px 8px 3px; margin-top: 2px; border-top: 1px solid var(--border-subtle); color: var(--text-tertiary); font-size: .82rem; }
 /* a file change Big Brain proposes, waiting for Accept / Reject */
 .ai-edit { margin: 8px 0; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-card); overflow: hidden; }
 .ai-edit header, .ai-edit footer { display: flex; align-items: center; gap: 8px; padding: 6px 10px; }
@@ -1358,4 +1381,4 @@ body:has(.update-card:not([hidden])) .toasts { bottom: calc(40px + var(--update-
   .md a.external::after { content: none; }
   @page { margin: 18mm 16mm; }
 }
-.editor-hl::-webkit-scrollbar-thumb { background: transparent; }
+.editor-hl::-webkit-scrollbar-thumb, .editor-syn::-webkit-scrollbar-thumb { background: transparent; }
