@@ -1,10 +1,13 @@
 name: CI
 
 # Pushes to main are tested by the Release workflow, which calls this one per platform.
+# Docs-only and other non-code changes skip CI.
 on:
   push:
     branches-ignore: [main]
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".gitignore", ".env.example", ".github/ISSUE_TEMPLATE/**"]
   pull_request:
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".gitignore", ".env.example", ".github/ISSUE_TEMPLATE/**"]
   workflow_call:
     inputs:
       os:

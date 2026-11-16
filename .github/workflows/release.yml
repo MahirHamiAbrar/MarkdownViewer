@@ -8,7 +8,9 @@ name: Release
 on:
   push:
     branches: [main]
-    paths-ignore: ["**.md", "docs/**", "LICENSE"]
+    # Docs, repo housekeeping and the install scripts (served from main, not packaged) never
+    # change the app, so they do not cut a release.
+    paths-ignore: ["**.md", "docs/**", "LICENSE", ".gitignore", ".env.example", ".github/ISSUE_TEMPLATE/**", "scripts/install.sh", "scripts/install.ps1"]
   workflow_dispatch:
 
 # One release at a time, so two pushes never pick the same version.

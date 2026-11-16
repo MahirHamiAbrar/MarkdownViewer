@@ -18,6 +18,38 @@ Installers land in `src-tauri/target/release/bundle/`.
 
 > Windows and macOS builds are tested less than Linux. Please report what breaks.
 
+## Development
+
+Requires [Rust](https://rustup.rs), Node.js, and the Tauri system dependencies for your platform.
+
+```sh
+npm ci          # install the Tauri CLI
+npm run dev     # run the app in development mode
+npm run build   # release build with installers/bundles
+```
+
+Tests and checks:
+
+```sh
+cargo test --manifest-path src-tauri/Cargo.toml
+node --check src/main.js
+node src/mdsource.js
+```
+
+CI ([`.github/workflows`](../.github/workflows)) runs the tests on every push and pull request.
+
+## Architecture
+
+- `src/`: frontend, plain HTML/CSS/JS (no framework), with Mermaid, KaTeX and pdf.js vendored for diagrams, math and the PDF viewer
+- `src-tauri/`: Rust backend (Tauri 2): Markdown rendering via
+  [comrak](https://github.com/kivikakk/comrak), highlighting via syntect (two-face syntax set),
+  HTML sanitization via [ammonia](https://github.com/rust-ammonia/ammonia), plus the model
+  provider layer (`providers.rs`, `ai.rs`, `anthropic.rs`: streaming, reasoning, usage/cost, keychain), chat storage, file tree, search, font
+  listing, and PDF export commands, plus private web search (`web_search.rs`:
+  Google/Bing/DuckDuckGo/Mojeek/SearXNG through proxy/Tor with retries) and highlights (`highlights.rs`)
+- `install.sh`: build + Linux desktop integration (desktop file, icons, MIME defaults)
+- `scripts/install.sh`, `scripts/install.ps1`: one-command installers for the latest release
+
 ## Signing your own build
 
 **Linux (AppImage).** Set `SIGN=1`, optionally `SIGN_KEY=<gpg key id>` and
