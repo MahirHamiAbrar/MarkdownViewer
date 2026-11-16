@@ -3219,8 +3219,10 @@ function updateTrace(node, msg) {
   const actions = msg.actions || [];
   details.hidden = !actions.length;
   if (!actions.length) return;
-  $(".ai-trace-count", node).textContent = String(actions.length);
-  details.classList.toggle("streaming", Boolean(state.ai.streaming && state.ai.current?.msg === msg));
+  // From the actions themselves: finalizeAssistant runs while state.ai.streaming is still true.
+  const running = actions.filter((action) => action.status === "running").length;
+  $(".ai-trace-count", node).textContent = String(running || actions.length); // CSS adds " running"
+  details.classList.toggle("streaming", running > 0);
   list.innerHTML = actions.map((action) => {
     const icon = action.kind === "context" ? "file"
       : action.kind === "selection" ? "sparkle"
@@ -3266,7 +3268,7 @@ async function renderChatMarkdown(node, src, { streaming = false } = {}) {
     return;
   }
   try {
-    const html = await invoke("render_markdown", { src });
+    const html = await invoke("render_markdown", { src: texDelimiters(src) }); // models write \( \) math
     if (!node.isConnected || body.dataset.renderToken !== token) return;
     body.innerHTML = html;
     for (const child of body.querySelectorAll("[id]")) child.removeAttribute("id");
